@@ -1030,8 +1030,6 @@ function formatLiveResearch(lr: LiveResearchResult): string {
     if (lr.radar.categories.length) sections.push(`Category Rankings: ${lr.radar.categories.join(', ')}`);
     if (lr.radar.trafficTrend) sections.push(`HTTP Protocol Mix: ${lr.radar.trafficTrend}`);
     sections.push(`Radar Page: https://radar.cloudflare.com/domains/domain/${lr.dns.aRecords.length ? '' : ''}${lr.website.title ? '' : ''}`);
-  } else {
-    sections.push('\n## CLOUDFLARE RADAR: Not available (set CF_API_TOKEN secret for domain ranking and traffic data)');
   }
 
   sections.push('\n=== END LIVE RESEARCH DATA ===');
@@ -1144,7 +1142,7 @@ When the live data contradicts the CRM data (e.g., CDN provider differs), flag t
     case 'company_overview':
       title = `Company Overview: ${account.account_name}`;
       system = `You are a senior sales intelligence analyst at Cloudflare. Produce a concise executive briefing on a target account. You have access to BOTH CRM data AND live research data (website scraping, DNS probes, HTTP header analysis, news, SEC filings). Cite your sources. Format with clear headers using markdown. Be specific with numbers.${sourceInstructions}`;
-      prompt = `Analyze this account and produce an executive briefing:\n\nCRM DATA:\n${ctx}\n\n${liveCtx}\n\nCover:\n1. **Company Profile** — Who they are, what they do, their mission (USE the website About page text and meta description from live data)\n2. **Verified Infrastructure** — Compare CRM data vs live probe results. Flag any discrepancies (e.g., CRM says CDN is X but live headers show Y)\n3. **Security Posture** — Analyze the security headers audit from the live probe. Identify missing headers as gaps.\n4. **Traffic Footprint** — Geographic distribution and implications\n5. **Recent News & Market Context** — Summarize any recent headlines found. What do they tell us about the company's priorities?\n6. **SEC Filings** — If found, summarize relevance. If not found, note the company may be private.\n7. **Growth Signals** — Revenue, headcount, hiring signals (from careers page), digital presence\n8. **Key Risks & Recommendations**\n\nCite [Source] for every claim.`;
+      prompt = `Analyze this account and produce an executive briefing:\n\nCRM DATA:\n${ctx}\n\n${liveCtx}\n\nCover:\n1. **Company Profile** — Who they are, what they do, their mission (USE the website About page text and meta description from live data)\n2. **Verified Infrastructure** — Compare CRM data vs live probe results. Flag any discrepancies (e.g., CRM says CDN is X but live headers show Y)\n3. **Security Posture** — Analyze the security headers audit from the live probe. Identify missing headers as gaps.\n4. **Traffic Footprint** — Geographic distribution and implications\n5. **Recent News & Market Context** — Summarize any recent headlines found. What do they tell us about the company's priorities?\n6. **SEC Filings** — If found, summarize relevance. If not found, skip this section entirely.\n7. **Growth Signals** — Revenue, headcount, hiring signals (from careers page), digital presence\n8. **Key Risks & Recommendations**\n\nCite [Source] for every claim.`;
       break;
 
     case 'competitive_analysis':
@@ -1458,7 +1456,8 @@ CRITICAL RULES:
 - Reference likely EARNINGS CALL THEMES for their industry: digital transformation, cost optimization, security posture, AI readiness, operational efficiency, customer experience
 - Cloudflare products: CDN, Argo Smart Routing, WAF, DDoS Protection, Bot Management, Zero Trust (Access, Gateway, WARP, Browser Isolation), Workers (edge compute), R2 (zero-egress storage), D1, Pages, DNS, Magic Transit, Magic WAN, Stream, Images, Email Security, API Shield, Page Shield, Zaraz, Observatory, Cache Reserve, Waiting Room
 - Make it READY TO SEND — professional, polished, no placeholders. The rep should be able to copy-paste and hit send.
-- ALWAYS include a "Resources" or "Learn More" section at the end of the email with 3-5 hyperlinked resources (product pages, case studies, whitepapers, analyst reports) relevant to the products you are recommending. Format them as clickable markdown links. These help the recipient self-educate and build internal buy-in. Choose the MOST relevant resources from the list provided — don't just dump everything.`;
+- ALWAYS include a "Resources" or "Learn More" section at the end of the email with 3-5 hyperlinked resources (product pages, case studies, whitepapers, analyst reports) relevant to the products you are recommending. Format them as clickable markdown links. Choose the MOST relevant resources from the list provided.
+- ABSOLUTE OUTPUT RULES: NEVER include internal notes, system text, or data-gap indicators in the email. No "N/A", "No data found", "data not available", "unknown", "not configured", "no public data". If a data point is missing, skip it entirely — do not mention its absence. Never reference "CRM data", "live probe", "scraped data", "AI", or any tooling. The email must read as a polished message from a real human who personally researched the company.`;
 
   const resourcesCtx = getResourcesForAccount(account);
 
@@ -2256,7 +2255,7 @@ app.post('/api/campaigns/:id/generate', async (c) => {
   const generatedIds = new Set(alreadyGenerated.results.map((r: any) => r.account_id));
 
   const pendingIds = accountIds.filter(id => !generatedIds.has(id));
-  const batchIds = pendingIds.slice(0, 3); // 3 at a time (more context per email)
+  const batchIds = pendingIds.slice(0, 2); // 2 at a time (full live research per email)
 
   if (!batchIds.length) {
     await c.env.DB.prepare('UPDATE campaigns SET status = ? WHERE id = ?').bind('complete', campaignId).run();
@@ -2305,37 +2304,83 @@ app.post('/api/campaigns/:id/generate', async (c) => {
     const annualSavings = Math.round(totalDisplaceable * 0.3 * 12);
     const costCtx = totalDisplaceable > 0 ? `\nCOST OF INACTION: $${annualSavings.toLocaleString()}/year in potential savings. CDN: $${cdnS.toLocaleString()}/mo (${a.cdn_primary||'unknown'}), Security: $${secS.toLocaleString()}/mo (${a.security_primary||'unknown'}), DNS: $${dnsS.toLocaleString()}/mo (${a.dns_primary||'unknown'}).` : '';
 
-    // Quick website scrape for personalization (no Puppeteer for speed, just fetch)
-    let websiteQuote = '';
+    // Full live intelligence gather per account (parallel: website + news + SEC + funding)
     const domain = String(a.website || a.website_domain || '');
-    if (domain) {
-      try {
-        const clean = domain.replace(/^https?:\/\//, '').replace(/\/.*/, '');
-        const wr = await fetch(`https://${clean}`, { headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'text/html' }, signal: AbortSignal.timeout(4000), redirect: 'follow' });
-        if (wr.ok) {
-          const html = await wr.text();
-          const metaMatch = html.match(/<meta[^>]*name=["']description["'][^>]*content=["'](.*?)["']/is);
-          if (metaMatch) websiteQuote = `\nFROM THEIR WEBSITE: "${metaMatch[1].trim().slice(0, 200)}"`;
+    const companyName = String(a.account_name);
+    const cleanDomain = domain.replace(/^https?:\/\//, '').replace(/\/.*/, '');
+
+    const [websiteData, newsData, secData, fundingData] = await Promise.all([
+      // Website: homepage + about + investor relations
+      (async () => {
+        const result = { desc: '', about: '', ir: '', title: '' };
+        const pages = [
+          { url: `https://${cleanDomain}`, key: 'desc' },
+          { url: `https://${cleanDomain}/about`, key: 'about' },
+          { url: `https://${cleanDomain}/investors`, key: 'ir' },
+        ];
+        for (const pg of pages) {
+          try {
+            const r = await fetch(pg.url, { headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36', 'Accept': 'text/html' }, signal: AbortSignal.timeout(5000), redirect: 'follow' });
+            if (!r.ok) continue;
+            const html = await r.text();
+            const text = html.replace(/<script[^>]*>[\s\S]*?<\/script>/gi,'').replace(/<style[^>]*>[\s\S]*?<\/style>/gi,'').replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').trim();
+            if (pg.key === 'desc') {
+              const metaM = html.match(/<meta[^>]*name=["']description["'][^>]*content=["'](.*?)["']/is);
+              if (metaM) result.desc = metaM[1].trim().slice(0, 300);
+              const titleM = html.match(/<title[^>]*>(.*?)<\/title>/is);
+              if (titleM) result.title = titleM[1].replace(/<[^>]+>/g,'').trim().slice(0, 150);
+            } else if (pg.key === 'about') {
+              result.about = text.slice(0, 1500);
+            } else if (pg.key === 'ir') {
+              result.ir = text.slice(0, 1500);
+            }
+          } catch (_) {}
         }
-      } catch (_) {}
-    }
+        return result;
+      })(),
+      // News
+      searchNews(companyName),
+      // SEC filings
+      fetchSECFilings(companyName),
+      // Funding
+      searchFunding(companyName, domain),
+    ]);
+
+    // Build rich public intel context
+    let publicIntel = '';
+    if (websiteData.desc) publicIntel += `\nFROM THEIR WEBSITE: "${websiteData.desc}"`;
+    if (websiteData.about) publicIntel += `\nABOUT PAGE (their own words):\n${websiteData.about.slice(0, 800)}`;
+    if (websiteData.ir) publicIntel += `\nINVESTOR RELATIONS PAGE:\n${websiteData.ir.slice(0, 800)}`;
+    if (newsData) publicIntel += `\nRECENT NEWS HEADLINES:\n${newsData}`;
+    if (secData.filings) publicIntel += `\nSEC FILINGS:\n${secData.filings.slice(0, 500)}`;
+    if (fundingData) publicIntel += `\nFUNDING DATA:\n${fundingData.slice(0, 400)}`;
 
     const system = `You are a ${personaConfig.title} at Cloudflare writing a hyper-personalized campaign email.
 PERSONA: ${personaConfig.name} — ${personaConfig.description}
 TONE: ${personaConfig.tone}
 CAMPAIGN THEME: ${themeConfig.name}
 
-CRITICAL: This email must feel like you spent 30 minutes researching THIS specific account. Reference their actual:
-- Company name, industry, and what they do (use their website description if available)
-- Current vendor stack by name (CDN: ${a.cdn_primary || 'unknown'}, Security: ${a.security_primary || 'unknown'}, DNS: ${a.dns_primary || 'unknown'})
-- IT spend ($${(a.total_it_spend || 0).toLocaleString()}/mo)
-- Specific Cloudflare products that replace their current vendors
-- Quantified savings and cost of inaction
+CRITICAL: This email must feel like you spent an HOUR researching this specific account. You MUST reference:
+1. What the company does IN THEIR OWN WORDS (from their website/about page)
+2. Recent news about them — earnings announcements, leadership changes, acquisitions, partnerships, security incidents, product launches. If news was found, weave it into the narrative naturally.
+3. Their investor relations content or SEC filings — revenue trends, strategic priorities mentioned in earnings calls, risk factors
+4. Any funding rounds or investment activity
+5. Their current vendor stack BY NAME with spend amounts
+6. Specific Cloudflare products that replace each vendor, with concrete advantages
+7. Quantified cost of inaction with their real spend numbers
+
+If they had a security breach/incident in the news, lead with that. If they announced earnings, reference their stated priorities. If they raised funding, connect Cloudflare to their growth plans. If they changed leadership, position this as a fresh start.
 
 ${themeConfig.prompt}
 
-Start with: Subject: [personalized subject with their company name]
-Keep it 250-350 words. Make EVERY sentence specific to this account. No generic filler.`;
+Start with: Subject: [highly personalized subject referencing something specific about them — a news headline, their mission, or a concrete finding]
+Keep it 300-400 words. Every sentence must be specific to THIS account.
+
+ABSOLUTE RULES FOR THE OUTPUT:
+- NEVER include any meta-instructions, internal notes, or system text in the email (no "N/A", "No data found", "use CRM data", "no public data", "not available", etc.)
+- If a data point is missing, simply DO NOT mention it. Skip it entirely. Do not say "data not available" or "unknown".
+- The output must read as a polished, professional email from a real human. Zero indication that it was AI-generated or that data was missing.
+- Do not reference "CRM data", "live probe", "scraped", "AI", or any internal tooling. Write as if you personally researched this company.`;
 
     const prompt = `Generate a hyper-personalized ${themeConfig.name} email for ${a.account_name}:
 
@@ -2344,13 +2389,16 @@ ${ctx}
 ${competitorCtx}
 ${displacementCtx}
 ${costCtx}
-${websiteQuote}
+
+PUBLIC INTELLIGENCE (live-gathered):
+${publicIntel || ''}
 
 CLOUDFLARE PLATFORM EDGE:
 - Network: 330+ cities, 100+ Tbps, sub-50ms global latency
 - Pricing: Flat-rate, no bandwidth charges, zero egress (R2)
 - Platform: CDN + Security + Zero Trust + DNS + Compute + Storage — one vendor
 - Analyst: Gartner SSE Leader, Forrester WAF/CDN/DDoS Leader
+- Innovation: Birthday Week, Security Week, GA Week ship dozens of features quarterly
 ${campaign.custom_context ? '\nCAMPAIGN CONTEXT: ' + campaign.custom_context : ''}`;
 
     try {
@@ -2375,7 +2423,7 @@ ${campaign.custom_context ? '\nCAMPAIGN CONTEXT: ' + campaign.custom_context : '
     generated: newGenCount,
     total: campaign.total_accounts,
     batch: results,
-    hasMore: pendingIds.length > 3,
+    hasMore: pendingIds.length > 2,
   });
 });
 
@@ -2462,10 +2510,10 @@ CLOUDFLARE PRODUCTS IN THIS CATEGORY:
 ${cfProducts}
 
 LIVE SCRAPED: ${comp.name} PAGES:
-${competitorCtx || 'Competitor pages could not be scraped.'}
+${competitorCtx || ''}
 
 LIVE SCRAPED: CLOUDFLARE PAGE:
-${cfPage.slice(0, 3000) || 'CF page could not be scraped.'}
+${cfPage.slice(0, 3000) || ''}
 
 Generate these sections:
 

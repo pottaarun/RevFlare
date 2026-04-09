@@ -1193,7 +1193,7 @@ function renderCampaignDetail(c, id) {
 
     // Generate button
     if (cp.generated < cp.total_accounts) {
-      h += '<button class="btn btn-primary btn-lg" id="gen-batch-btn" style="width:100%;justify-content:center;padding:14px 24px;font-size:15px;margin-bottom:8px">' + IC.sparkles + ' Generate Next Batch (5 emails)</button>';
+      h += '<button class="btn btn-primary btn-lg" id="gen-batch-btn" style="width:100%;justify-content:center;padding:14px 24px;font-size:15px;margin-bottom:8px">' + IC.sparkles + ' Generate Next Batch (2 emails with full live research)</button>';
       h += '<div id="gen-progress" style="margin-bottom:24px"></div>';
     }
 
@@ -1238,7 +1238,7 @@ function renderCampaignDetail(c, id) {
 
           if (result.hasMore) {
             genBtn.disabled = false;
-            genBtn.innerHTML = IC.sparkles + ' Generate Next Batch (' + Math.min(5, result.total - result.generated) + ' emails)';
+            genBtn.innerHTML = IC.sparkles + ' Generate Next Batch (' + Math.min(2, result.total - result.generated) + ' emails)';
           } else {
             genBtn.innerHTML = '\u2713 Campaign Complete';
             genBtn.classList.remove('btn-primary');

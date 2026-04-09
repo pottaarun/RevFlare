@@ -94,9 +94,10 @@ window.addEventListener('DOMContentLoaded', function() {
     var navRight = document.querySelector('.nav-right');
     if (navRight) {
       if (g.connected) {
-        navRight.insertAdjacentHTML('afterbegin', '<span style="font-size:11px;color:var(--green);font-weight:600;padding:4px 10px;background:var(--green-bg);border:1px solid rgba(52,211,153,0.2);border-radius:var(--radius-pill);cursor:default" title="Connected: ' + g.gmailAddress + '">' + IC.mail + ' Gmail</span>');
+        navRight.insertAdjacentHTML('afterbegin', '<span style="font-size:11px;color:var(--green);font-weight:600;padding:4px 10px;background:var(--green-bg);border:1px solid rgba(52,211,153,0.2);border-radius:var(--radius-pill);cursor:default" title="Connected: ' + g.gmailAddress + '">' + IC.mail + ' Gmail: ' + g.gmailAddress.split('@')[0] + '</span>');
       } else {
-        navRight.insertAdjacentHTML('afterbegin', '<a href="/api/gmail/connect" class="btn btn-ghost btn-sm" style="font-size:11px;padding:4px 10px" target="_blank">' + IC.mail + ' Connect Gmail</a>');
+        navRight.insertAdjacentHTML('afterbegin', '<button class="btn btn-ghost btn-sm" style="font-size:11px;padding:4px 10px" id="gmail-setup-btn">' + IC.mail + ' Connect Gmail</button>');
+        document.getElementById('gmail-setup-btn').addEventListener('click', function() { showGmailSetupWizard(); });
       }
     }
   }).catch(function() {});
@@ -1409,6 +1410,180 @@ function renderShareView(container, token) {
   }).catch(function(err) {
     container.innerHTML = '<div class="empty-state"><div style="font-size:48px;opacity:0.3;margin-bottom:16px">' + IC.shield + '</div><h2 class="page-title" style="font-size:22px">' + err.message + '</h2><p class="page-subtitle" style="margin-top:8px">This share link may be invalid or expired.</p></div>';
   });
+}
+
+// ══════════════════════════════════════════════════════════════════
+// GMAIL SETUP WIZARD (in-app guided walkthrough)
+// ══════════════════════════════════════════════════════════════════
+function showGmailSetupWizard() {
+  // Create modal overlay
+  var overlay = document.createElement('div');
+  overlay.id = 'gmail-wizard-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);backdrop-filter:blur(8px);z-index:1000;display:flex;align-items:center;justify-content:center;padding:20px';
+
+  var modal = document.createElement('div');
+  modal.style.cssText = 'background:var(--bg-surface);border:1px solid var(--border-glass);border-radius:var(--radius-xl);max-width:640px;width:100%;max-height:90vh;overflow-y:auto;box-shadow:var(--shadow-float)';
+
+  var steps = [
+    {
+      title: 'Connect Your Gmail',
+      icon: IC.mail,
+      content: '<p style="font-size:14px;color:var(--text-secondary);line-height:1.7;margin-bottom:20px">Connecting Gmail lets you send AI-generated emails directly from RevFlare using your own email address. Emails appear in your Sent folder, recipients see your real address.</p>'
+        + '<div style="display:flex;gap:12px;margin-bottom:20px">'
+        + '<div class="d-card" style="flex:1;text-align:center;padding:16px"><div style="font-size:24px;margin-bottom:6px">' + IC.shield + '</div><div style="font-size:12px;color:var(--text-secondary);font-weight:600">Secure OAuth</div><div style="font-size:11px;color:var(--text-muted)">No passwords stored</div></div>'
+        + '<div class="d-card" style="flex:1;text-align:center;padding:16px"><div style="font-size:24px;margin-bottom:6px">' + IC.send + '</div><div style="font-size:12px;color:var(--text-secondary);font-weight:600">Send Only</div><div style="font-size:11px;color:var(--text-muted)">Cannot read your inbox</div></div>'
+        + '<div class="d-card" style="flex:1;text-align:center;padding:16px"><div style="font-size:24px;margin-bottom:6px">' + IC.zap + '</div><div style="font-size:12px;color:var(--text-secondary);font-weight:600">One-Click</div><div style="font-size:11px;color:var(--text-muted)">Send directly from RevFlare</div></div>'
+        + '</div>'
+        + '<p style="font-size:13px;color:var(--text-muted)">This requires a Google Cloud OAuth app. Your admin may have already set this up. Click Next to check.</p>',
+      action: 'Next',
+    },
+    {
+      title: 'Step 1: Check If Ready',
+      icon: IC.zap,
+      content: '<p style="font-size:14px;color:var(--text-secondary);line-height:1.7;margin-bottom:16px">Let\'s first check if Gmail is already configured on this RevFlare instance.</p>'
+        + '<div id="wizard-check" style="padding:20px;text-align:center"><div class="spinner" style="margin:0 auto 12px"></div><div style="color:var(--text-muted);font-size:13px">Checking configuration...</div></div>',
+      action: 'Check Now',
+      onShow: function() {
+        fetch('/api/gmail/connect', { redirect: 'manual' }).then(function(r) {
+          var checkEl = document.getElementById('wizard-check');
+          if (r.status === 302 || r.type === 'opaqueredirect') {
+            // OAuth is configured, redirect exists
+            checkEl.innerHTML = '<div style="font-size:28px;color:var(--green);margin-bottom:12px">\u2713</div>'
+              + '<div style="font-size:15px;font-weight:700;color:var(--green);margin-bottom:8px">Gmail is configured!</div>'
+              + '<p style="font-size:13px;color:var(--text-muted);margin-bottom:20px">Click the button below to authorize RevFlare to send emails from your Gmail account.</p>'
+              + '<a href="/api/gmail/connect" target="_blank" class="btn btn-primary btn-lg" style="width:100%;justify-content:center">' + IC.mail + ' Authorize Gmail Now</a>'
+              + '<p style="font-size:11px;color:var(--text-muted);margin-top:12px">A Google sign-in window will open. Select your account and click Allow.</p>';
+          } else {
+            return r.json().then(function(d) {
+              if (d.error && d.error.includes('GOOGLE_CLIENT_ID')) {
+                checkEl.innerHTML = '<div style="font-size:28px;color:var(--amber);margin-bottom:12px">\u26A0</div>'
+                  + '<div style="font-size:15px;font-weight:700;color:var(--amber);margin-bottom:8px">Gmail Not Configured Yet</div>'
+                  + '<p style="font-size:13px;color:var(--text-muted)">An admin needs to set up Google OAuth credentials first. Follow the steps on the next pages.</p>';
+              }
+            });
+          }
+        }).catch(function() {
+          var checkEl = document.getElementById('wizard-check');
+          if (checkEl) checkEl.innerHTML = '<div style="font-size:15px;font-weight:700;color:var(--amber);margin-bottom:8px">Could not check</div><p style="font-size:13px;color:var(--text-muted)">Follow the setup steps on the next pages.</p>';
+        });
+      },
+    },
+    {
+      title: 'Step 2: Create Google Cloud Project',
+      icon: IC.building,
+      content: '<div style="font-size:14px;color:var(--text-secondary);line-height:1.8">'
+        + '<div class="d-card" style="margin-bottom:12px"><div style="display:flex;align-items:center;gap:10px;margin-bottom:8px"><span style="background:var(--accent-glow);color:var(--accent-bright);font-weight:700;width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px">1</span><strong>Open Google Cloud Console</strong></div><p style="font-size:13px;color:var(--text-muted)">Go to <a href="https://console.cloud.google.com" target="_blank" style="color:var(--accent-bright)">console.cloud.google.com</a></p></div>'
+        + '<div class="d-card" style="margin-bottom:12px"><div style="display:flex;align-items:center;gap:10px;margin-bottom:8px"><span style="background:var(--accent-glow);color:var(--accent-bright);font-weight:700;width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px">2</span><strong>Create a New Project</strong></div><p style="font-size:13px;color:var(--text-muted)">Click the project dropdown at the top &rarr; <strong>New Project</strong> &rarr; Name it <code>RevFlare</code> &rarr; Click <strong>Create</strong></p></div>'
+        + '<div class="d-card" style="margin-bottom:12px"><div style="display:flex;align-items:center;gap:10px;margin-bottom:8px"><span style="background:var(--accent-glow);color:var(--accent-bright);font-weight:700;width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px">3</span><strong>Enable Gmail API</strong></div><p style="font-size:13px;color:var(--text-muted)">Left sidebar &rarr; <strong>APIs &amp; Services</strong> &rarr; <strong>Library</strong> &rarr; Search <code>Gmail API</code> &rarr; Click <strong>Enable</strong></p></div>'
+        + '</div>',
+      action: 'Next',
+    },
+    {
+      title: 'Step 3: OAuth Consent Screen',
+      icon: IC.shield,
+      content: '<div style="font-size:14px;color:var(--text-secondary);line-height:1.8">'
+        + '<div class="d-card" style="margin-bottom:12px"><div style="display:flex;align-items:center;gap:10px;margin-bottom:8px"><span style="background:var(--accent-glow);color:var(--accent-bright);font-weight:700;width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px">4</span><strong>Configure Consent Screen</strong></div><p style="font-size:13px;color:var(--text-muted)">Left sidebar &rarr; <strong>APIs &amp; Services</strong> &rarr; <strong>OAuth consent screen</strong><br/>Select <strong>External</strong> &rarr; Click <strong>Create</strong></p></div>'
+        + '<div class="d-card" style="margin-bottom:12px"><div style="display:flex;align-items:center;gap:10px;margin-bottom:8px"><span style="background:var(--accent-glow);color:var(--accent-bright);font-weight:700;width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px">5</span><strong>Fill In Details</strong></div><p style="font-size:13px;color:var(--text-muted)"><strong>App name:</strong> <code>RevFlare</code><br/><strong>User support email:</strong> your email<br/><strong>Developer contact:</strong> your email<br/>Click <strong>Save and Continue</strong> through all steps</p></div>'
+        + '<div class="d-card" style="margin-bottom:12px"><div style="display:flex;align-items:center;gap:10px;margin-bottom:8px"><span style="background:var(--accent-glow);color:var(--accent-bright);font-weight:700;width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px">6</span><strong>Add Test User</strong></div><p style="font-size:13px;color:var(--text-muted)">On the <strong>Test users</strong> step, add your Gmail address and click <strong>Save</strong></p></div>'
+        + '</div>',
+      action: 'Next',
+    },
+    {
+      title: 'Step 4: Create OAuth Credentials',
+      icon: IC.zap,
+      content: '<div style="font-size:14px;color:var(--text-secondary);line-height:1.8">'
+        + '<div class="d-card" style="margin-bottom:12px"><div style="display:flex;align-items:center;gap:10px;margin-bottom:8px"><span style="background:var(--accent-glow);color:var(--accent-bright);font-weight:700;width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px">7</span><strong>Create Credentials</strong></div><p style="font-size:13px;color:var(--text-muted)">Left sidebar &rarr; <strong>Credentials</strong> &rarr; <strong>+ Create Credentials</strong> &rarr; <strong>OAuth client ID</strong><br/>Application type: <strong>Web application</strong><br/>Name: <code>RevFlare</code></p></div>'
+        + '<div class="d-card" style="margin-bottom:12px;border-color:rgba(52,211,153,0.2)"><div style="display:flex;align-items:center;gap:10px;margin-bottom:8px"><span style="background:var(--green-bg);color:var(--green);font-weight:700;width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px">8</span><strong style="color:var(--green)">Add Redirect URI (Critical!)</strong></div><p style="font-size:13px;color:var(--text-muted)">Under <strong>Authorized redirect URIs</strong>, click <strong>Add URI</strong> and paste exactly:</p><div style="background:var(--bg-deep);padding:10px 14px;border-radius:var(--radius-md);margin-top:8px;font-family:monospace;font-size:12px;color:var(--accent-bright);cursor:pointer;border:1px solid var(--border-glass)" onclick="navigator.clipboard.writeText(location.origin+\'/api/gmail/callback\');this.style.borderColor=\'var(--green)\';setTimeout(function(){},1500)" id="redirect-uri-box">' + location.origin + '/api/gmail/callback <span style="opacity:0.5;margin-left:8px">click to copy</span></div></div>'
+        + '<div class="d-card" style="margin-bottom:12px"><div style="display:flex;align-items:center;gap:10px;margin-bottom:8px"><span style="background:var(--accent-glow);color:var(--accent-bright);font-weight:700;width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px">9</span><strong>Copy Client ID &amp; Secret</strong></div><p style="font-size:13px;color:var(--text-muted)">Click <strong>Create</strong>. A popup shows your <strong>Client ID</strong> and <strong>Client Secret</strong>. Copy both.</p></div>'
+        + '</div>',
+      action: 'Next',
+    },
+    {
+      title: 'Step 5: Store Credentials',
+      icon: IC.shield,
+      content: '<div style="font-size:14px;color:var(--text-secondary);line-height:1.8">'
+        + '<p style="margin-bottom:16px">An admin needs to run these two commands in the RevFlare project directory to store the credentials securely:</p>'
+        + '<div style="background:var(--bg-deep);padding:14px 16px;border-radius:var(--radius-md);font-family:monospace;font-size:12px;color:var(--text-primary);margin-bottom:12px;border:1px solid var(--border-glass);line-height:2">'
+        + '<span style="color:var(--text-muted)"># Run these in your terminal:</span><br/>'
+        + '<span style="color:var(--accent-bright)">npx wrangler secret put GOOGLE_CLIENT_ID</span><br/>'
+        + '<span style="color:var(--text-muted)"># paste your Client ID when prompted</span><br/><br/>'
+        + '<span style="color:var(--accent-bright)">npx wrangler secret put GOOGLE_CLIENT_SECRET</span><br/>'
+        + '<span style="color:var(--text-muted)"># paste your Client Secret when prompted</span>'
+        + '</div>'
+        + '<p style="font-size:13px;color:var(--text-muted)">Secrets are encrypted and stored in Cloudflare\'s secret store. They never appear in code or git. No redeploy needed &mdash; they take effect immediately.</p>'
+        + '</div>',
+      action: 'Next',
+    },
+    {
+      title: 'Step 6: Connect!',
+      icon: IC.send,
+      content: '<div style="text-align:center;padding:20px 0">'
+        + '<div style="font-size:48px;margin-bottom:16px">' + IC.mail + '</div>'
+        + '<p style="font-size:15px;color:var(--text-secondary);margin-bottom:24px">Once the admin has stored the credentials, click the button below to authorize your Gmail account.</p>'
+        + '<a href="/api/gmail/connect" target="_blank" class="btn btn-primary btn-lg" style="width:100%;justify-content:center;padding:16px 24px;font-size:15px">' + IC.send + ' Connect Gmail Now</a>'
+        + '<p style="font-size:12px;color:var(--text-muted);margin-top:16px">A Google sign-in window will open. Select your Gmail account, review permissions (send-only), and click <strong>Allow</strong>. The window will close automatically and you\'re connected.</p>'
+        + '<div style="margin-top:24px;padding:14px;background:var(--green-bg);border:1px solid rgba(52,211,153,0.2);border-radius:var(--radius-md);font-size:12px;color:var(--green)"><strong>After connecting:</strong> Every generated email will show a green "Send via Gmail" button. Click it, enter the recipient, and the email sends directly from your Gmail. It appears in your Sent folder.</div>'
+        + '</div>',
+      action: 'Done',
+    },
+  ];
+
+  var currentStep = 0;
+
+  function renderStep() {
+    var step = steps[currentStep];
+    var isLast = currentStep === steps.length - 1;
+    var isFirst = currentStep === 0;
+
+    modal.innerHTML = '<div style="padding:28px">'
+      + '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:24px">'
+      + '<div style="display:flex;align-items:center;gap:12px"><span style="color:var(--accent-bright)">' + step.icon + '</span><h2 style="font-size:18px;font-weight:700;color:var(--text-primary);letter-spacing:-0.3px">' + step.title + '</h2></div>'
+      + '<button style="background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:18px;padding:4px" id="wizard-close">\u2715</button>'
+      + '</div>'
+
+      // Step indicators
+      + '<div style="display:flex;gap:4px;margin-bottom:24px">'
+      + steps.map(function(_, i) {
+          var color = i < currentStep ? 'var(--green)' : i === currentStep ? 'var(--accent-bright)' : 'var(--bg-elevated)';
+          return '<div style="flex:1;height:3px;border-radius:2px;background:' + color + '"></div>';
+        }).join('')
+      + '</div>'
+
+      + step.content
+
+      + '<div style="display:flex;gap:8px;margin-top:24px;justify-content:flex-end">'
+      + (isFirst ? '' : '<button class="btn btn-ghost" id="wizard-back">Back</button>')
+      + '<button class="btn btn-primary" id="wizard-next">' + step.action + '</button>'
+      + '</div></div>';
+
+    document.getElementById('wizard-close').addEventListener('click', function() { overlay.remove(); });
+    if (!isFirst) document.getElementById('wizard-back').addEventListener('click', function() { currentStep--; renderStep(); });
+    document.getElementById('wizard-next').addEventListener('click', function() {
+      if (isLast) { overlay.remove(); location.reload(); }
+      else { currentStep++; renderStep(); }
+    });
+
+    // Copy redirect URI on click
+    var uriBox = document.getElementById('redirect-uri-box');
+    if (uriBox) {
+      uriBox.addEventListener('click', function() {
+        navigator.clipboard.writeText(location.origin + '/api/gmail/callback');
+        uriBox.style.borderColor = 'var(--green)';
+        uriBox.querySelector('span').textContent = 'Copied!';
+      });
+    }
+
+    // Run onShow callback
+    if (step.onShow) step.onShow();
+  }
+
+  renderStep();
+  modal.style.cssText += '';
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
+
+  // Close on overlay click
+  overlay.addEventListener('click', function(e) { if (e.target === overlay) overlay.remove(); });
 }
 
 // ── Copy Utility ───────────────────────────────────────────────────

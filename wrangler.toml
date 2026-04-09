@@ -1,0 +1,19 @@
+name = "revflare"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+compatibility_flags = ["nodejs_compat"]
+account_id = "181a2fdc5974aca05e555ae1dd7c080b"
+
+[assets]
+directory = "./public"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "revflare-db"
+database_id = "50b3fd15-5802-4a89-9a4e-a37d0a278069"
+
+[ai]
+binding = "AI"
+
+[browser]
+binding = "BROWSER"

@@ -960,14 +960,19 @@ function renderCampaigns(c) {
     h += '<div class="persona-section-title" style="margin-top:28px">3. Message Type</div>';
     h += '<div class="msg-types" id="camp-msg-types"><div style="color:var(--text-muted);font-size:13px;padding:8px 0">Select a persona to see message types</div></div>';
 
-    h += '<div class="persona-section-title" style="margin-top:28px">4. Target Audience</div>';
+    // Step 4: Account Selection
+    h += '<div class="persona-section-title" style="margin-top:28px">4. Select Accounts</div>';
+    h += '<p style="font-size:12px;color:var(--text-muted);margin-bottom:12px">Search and pick specific accounts, or use filters to target a segment. Each email will be hyper-personalized to the selected account\'s tech stack, competitors, and spend.</p>';
     h += '<div class="toolbar" style="margin-bottom:8px">';
+    h += '<div class="search-wrap">' + IC.search + '<input type="text" class="search-input" id="camp-search" placeholder="Search accounts to add..." /></div>';
     h += '<select class="filter-select" id="cf-industry"><option value="">All Industries</option>' + (filters.industries || []).map(function(s) { return '<option>' + s + '</option>'; }).join('') + '</select>';
     h += '<select class="filter-select" id="cf-country"><option value="">All Countries</option>' + (filters.countries || []).map(function(s) { return '<option>' + s + '</option>'; }).join('') + '</select>';
-    h += '<select class="filter-select" id="cf-segment"><option value="">All Segments</option>' + (filters.segments || []).map(function(s) { return '<option>' + s + '</option>'; }).join('') + '</select>';
-    h += '<select class="filter-select" id="cf-status"><option value="">All Statuses</option>' + (filters.statuses || []).map(function(s) { return '<option>' + s + '</option>'; }).join('') + '</select>';
     h += '<select class="filter-select" id="cf-spend"><option value="">Any Spend</option><option value="1000">$1K+ /mo</option><option value="10000">$10K+ /mo</option><option value="100000">$100K+ /mo</option><option value="1000000">$1M+ /mo</option></select>';
+    h += '<button class="btn btn-ghost btn-sm" id="add-filtered-btn">Add All Matching</button>';
     h += '</div>';
+    h += '<div id="search-results" style="max-height:200px;overflow-y:auto;margin-bottom:12px"></div>';
+    h += '<div id="selected-accounts" style="margin-bottom:16px"><div style="color:var(--text-muted);font-size:13px;padding:8px 0">No accounts selected yet</div></div>';
+    h += '<div style="font-size:12px;color:var(--text-muted);margin-bottom:20px" id="selected-count">0 accounts selected</div>';
 
     h += '<div class="persona-section-title" style="margin-top:24px">5. Campaign Name & Context <span style="font-weight:400;color:var(--text-muted);text-transform:none;letter-spacing:0;font-size:11px">(optional)</span></div>';
     h += '<input type="text" class="search-input" id="camp-name" placeholder="Campaign name (e.g. Q1 Security Push - EMEA)" style="margin-bottom:10px;padding-left:14px" />';
@@ -981,6 +986,107 @@ function renderCampaigns(c) {
 
     // State
     var selTheme = null, selPersona = null, selMsg = null;
+    var selectedAccountIds = [];
+    var selectedAccountMap = {};
+
+    function renderSelectedAccounts() {
+      var el = document.getElementById('selected-accounts');
+      var countEl = document.getElementById('selected-count');
+      if (!selectedAccountIds.length) {
+        el.innerHTML = '<div style="color:var(--text-muted);font-size:13px;padding:8px 0">No accounts selected yet</div>';
+        countEl.textContent = '0 accounts selected';
+        return;
+      }
+      var chips = '';
+      for (var i = 0; i < selectedAccountIds.length; i++) {
+        var aid = selectedAccountIds[i];
+        var acc = selectedAccountMap[aid];
+        if (!acc) continue;
+        chips += '<span class="stack-chip is-cf" style="cursor:pointer;padding:5px 10px" data-remove="' + aid + '">' + acc.account_name + ' <span style="opacity:0.5;margin-left:4px">\u2715</span></span>';
+      }
+      el.innerHTML = '<div style="display:flex;flex-wrap:wrap;gap:6px">' + chips + '</div>';
+      countEl.innerHTML = '<strong style="color:var(--accent-bright)">' + selectedAccountIds.length + '</strong> accounts selected';
+
+      // Remove handlers
+      var removeBtns = el.querySelectorAll('[data-remove]');
+      for (var i = 0; i < removeBtns.length; i++) {
+        (function(btn) {
+          btn.addEventListener('click', function() {
+            var rid = parseInt(btn.getAttribute('data-remove'));
+            selectedAccountIds = selectedAccountIds.filter(function(x) { return x !== rid; });
+            delete selectedAccountMap[rid];
+            renderSelectedAccounts();
+          });
+        })(removeBtns[i]);
+      }
+    }
+
+    // Search accounts
+    var searchTimer;
+    var searchInput = document.getElementById('camp-search');
+    searchInput.addEventListener('input', function() {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(function() {
+        var q = searchInput.value;
+        if (q.length < 2) { document.getElementById('search-results').innerHTML = ''; return; }
+        api.get('/accounts?search=' + encodeURIComponent(q) + '&limit=20').then(function(d) {
+          var sr = document.getElementById('search-results');
+          if (!d.accounts.length) { sr.innerHTML = '<div style="padding:8px;font-size:12px;color:var(--text-muted)">No matches</div>'; return; }
+          var html = '';
+          for (var i = 0; i < d.accounts.length; i++) {
+            var a = d.accounts[i];
+            var isSelected = selectedAccountIds.indexOf(a.id) >= 0;
+            html += '<div class="search-result-item" data-id="' + a.id + '" style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border-bottom:1px solid var(--border-glass);cursor:pointer;font-size:13px' + (isSelected ? ';opacity:0.4' : '') + '">';
+            html += '<div><strong style="color:var(--text-primary)">' + a.account_name + '</strong> <span style="color:var(--text-muted);font-size:11px">' + (a.industry || '') + ' &middot; ' + fmtD(a.total_it_spend) + '/mo</span></div>';
+            html += '<span style="color:var(--text-muted);font-size:11px">' + (isSelected ? 'Added' : '+ Add') + '</span>';
+            html += '</div>';
+          }
+          sr.innerHTML = '<div style="background:var(--bg-surface);border:1px solid var(--border-glass);border-radius:var(--radius-md);overflow:hidden">' + html + '</div>';
+
+          var items = sr.querySelectorAll('.search-result-item');
+          for (var i = 0; i < items.length; i++) {
+            (function(item, account) {
+              item.addEventListener('click', function() {
+                var aid = parseInt(item.getAttribute('data-id'));
+                if (selectedAccountIds.indexOf(aid) >= 0) return;
+                selectedAccountIds.push(aid);
+                selectedAccountMap[aid] = account;
+                renderSelectedAccounts();
+                item.style.opacity = '0.4';
+                item.querySelector('span:last-child').textContent = 'Added';
+              });
+            })(items[i], d.accounts[i]);
+          }
+        });
+      }, 300);
+    });
+
+    // Add all matching filter results
+    var addFilteredBtn = document.getElementById('add-filtered-btn');
+    addFilteredBtn.addEventListener('click', function() {
+      var params = 'limit=200';
+      var fInd = document.getElementById('cf-industry').value;
+      var fCountry = document.getElementById('cf-country').value;
+      var fSpend = document.getElementById('cf-spend').value;
+      if (fInd) params += '&industry=' + encodeURIComponent(fInd);
+      if (fCountry) params += '&country=' + encodeURIComponent(fCountry);
+      if (fSpend) params += '&sort=total_it_spend&order=DESC';
+
+      addFilteredBtn.textContent = 'Loading...';
+      api.get('/accounts?' + params).then(function(d) {
+        for (var i = 0; i < d.accounts.length; i++) {
+          var a = d.accounts[i];
+          if (fSpend && (a.total_it_spend || 0) < parseInt(fSpend)) continue;
+          if (selectedAccountIds.indexOf(a.id) < 0) {
+            selectedAccountIds.push(a.id);
+            selectedAccountMap[a.id] = a;
+          }
+        }
+        renderSelectedAccounts();
+        addFilteredBtn.textContent = 'Add All Matching';
+        toast('Added ' + d.accounts.length + ' accounts', 'success');
+      });
+    });
 
     // Theme selection
     var themeCards = document.querySelectorAll('#theme-grid .research-card');
@@ -1032,30 +1138,20 @@ function renderCampaigns(c) {
       if (!selTheme) { toast('Select a campaign theme', 'error'); return; }
       if (!selPersona) { toast('Select a persona', 'error'); return; }
       if (!selMsg) { toast('Select a message type', 'error'); return; }
+      if (!selectedAccountIds.length) { toast('Select at least one account', 'error'); return; }
 
       var name = document.getElementById('camp-name').value || (themes[selTheme].name + ' - ' + new Date().toLocaleDateString());
       var context = document.getElementById('camp-context').value || '';
-      var filterObj = {};
-      var fInd = document.getElementById('cf-industry').value;
-      var fCountry = document.getElementById('cf-country').value;
-      var fSeg = document.getElementById('cf-segment').value;
-      var fStat = document.getElementById('cf-status').value;
-      var fSpend = document.getElementById('cf-spend').value;
-      if (fInd) filterObj.industry = fInd;
-      if (fCountry) filterObj.country = fCountry;
-      if (fSeg) filterObj.segment = fSeg;
-      if (fStat) filterObj.status = fStat;
-      if (fSpend) filterObj.minSpend = parseInt(fSpend);
 
       createBtn.disabled = true;
-      createBtn.innerHTML = '<div class="spinner" style="width:14px;height:14px;border-width:2px;display:inline-block;vertical-align:middle;margin-right:8px"></div> Creating campaign...';
+      createBtn.innerHTML = '<div class="spinner" style="width:14px;height:14px;border-width:2px;display:inline-block;vertical-align:middle;margin-right:8px"></div> Creating campaign for ' + selectedAccountIds.length + ' accounts...';
 
       api.post('/campaigns', {
         name: name,
         theme: selTheme,
         persona: selPersona,
         messageType: selMsg,
-        filters: filterObj,
+        accountIds: selectedAccountIds,
         customContext: context,
       }).then(function(result) {
         toast('Campaign created with ' + result.totalAccounts + ' accounts', 'success');

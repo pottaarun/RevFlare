@@ -2211,34 +2211,22 @@ app.get('/api/campaigns', async (c) => {
 // Get campaign themes
 app.get('/api/campaign-themes', (c) => c.json(CAMPAIGN_THEMES));
 
-// Create campaign
+// Create campaign (with explicit account selection)
 app.post('/api/campaigns', async (c) => {
   const email = c.get('userEmail');
-  const { name, theme, persona, messageType, filters, customContext } = await c.req.json<{
-    name: string; theme: string; persona: string; messageType: string; filters?: any; customContext?: string;
+  const { name, theme, persona, messageType, accountIds, customContext } = await c.req.json<{
+    name: string; theme: string; persona: string; messageType: string; accountIds?: number[]; customContext?: string;
   }>();
 
   if (!CAMPAIGN_THEMES[theme]) return c.json({ error: 'Invalid theme' }, 400);
   if (!PERSONA_CONFIGS[persona]) return c.json({ error: 'Invalid persona' }, 400);
+  if (!accountIds?.length) return c.json({ error: 'Select at least one account' }, 400);
 
-  // Count matching accounts
-  let where = 'WHERE user_email = ?';
-  const params: any[] = [email];
-  if (filters?.industry) { where += ' AND industry = ?'; params.push(filters.industry); }
-  if (filters?.country) { where += ' AND billing_country = ?'; params.push(filters.country); }
-  if (filters?.segment) { where += ' AND account_segment = ?'; params.push(filters.segment); }
-  if (filters?.status) { where += ' AND account_status = ?'; params.push(filters.status); }
-  if (filters?.minSpend) { where += ' AND total_it_spend >= ?'; params.push(filters.minSpend); }
-
-  const countResult = await c.env.DB.prepare(
-    `SELECT COUNT(*) as cnt FROM accounts ${where}`
-  ).bind(...params).first() as any;
-
-  const totalAccounts = countResult?.cnt || 0;
+  const totalAccounts = accountIds.length;
 
   const result = await c.env.DB.prepare(
     'INSERT INTO campaigns (name, theme, persona, message_type, filters, total_accounts, status, custom_context, user_email) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
-  ).bind(name, theme, persona, messageType, JSON.stringify(filters || {}), totalAccounts, 'draft', customContext || '', email).run();
+  ).bind(name, theme, persona, messageType, JSON.stringify({ accountIds }), totalAccounts, 'draft', customContext || '', email).run();
 
   return c.json({ id: result.meta.last_row_id, totalAccounts });
 });
@@ -2257,15 +2245,9 @@ app.post('/api/campaigns/:id/generate', async (c) => {
   const personaConfig = PERSONA_CONFIGS[campaign.persona];
   if (!themeConfig || !personaConfig) return c.json({ error: 'Invalid campaign config' }, 400);
 
-  // Get accounts matching filters
-  const filters = JSON.parse(campaign.filters || '{}');
-  let where = 'WHERE user_email = ?';
-  const params: any[] = [email];
-  if (filters.industry) { where += ' AND industry = ?'; params.push(filters.industry); }
-  if (filters.country) { where += ' AND billing_country = ?'; params.push(filters.country); }
-  if (filters.segment) { where += ' AND account_segment = ?'; params.push(filters.segment); }
-  if (filters.status) { where += ' AND account_status = ?'; params.push(filters.status); }
-  if (filters.minSpend) { where += ' AND total_it_spend >= ?'; params.push(filters.minSpend); }
+  // Get selected account IDs
+  const filterData = JSON.parse(campaign.filters || '{}');
+  const accountIds: number[] = filterData.accountIds || [];
 
   // Get batch of accounts not yet generated
   const alreadyGenerated = await c.env.DB.prepare(
@@ -2273,12 +2255,20 @@ app.post('/api/campaigns/:id/generate', async (c) => {
   ).bind(campaignId).all();
   const generatedIds = new Set(alreadyGenerated.results.map((r: any) => r.account_id));
 
-  const accounts = await c.env.DB.prepare(
-    `SELECT * FROM accounts ${where} ORDER BY total_it_spend DESC LIMIT 200`
-  ).bind(...params).all();
+  const pendingIds = accountIds.filter(id => !generatedIds.has(id));
+  const batchIds = pendingIds.slice(0, 3); // 3 at a time (more context per email)
 
-  const pending = accounts.results.filter((a: any) => !generatedIds.has(a.id));
-  const batch = pending.slice(0, 5); // Process 5 at a time
+  if (!batchIds.length) {
+    await c.env.DB.prepare('UPDATE campaigns SET status = ? WHERE id = ?').bind('complete', campaignId).run();
+    return c.json({ status: 'complete', generated: generatedIds.size, total: campaign.total_accounts });
+  }
+
+  // Fetch full account data for this batch
+  const batch: any[] = [];
+  for (const aid of batchIds) {
+    const acc = await c.env.DB.prepare('SELECT * FROM accounts WHERE id = ? AND user_email = ?').bind(aid, email).first();
+    if (acc) batch.push(acc);
+  }
 
   if (!batch.length) {
     await c.env.DB.prepare('UPDATE campaigns SET status = ? WHERE id = ?').bind('complete', campaignId).run();
@@ -2287,27 +2277,81 @@ app.post('/api/campaigns/:id/generate', async (c) => {
 
   await c.env.DB.prepare('UPDATE campaigns SET status = ? WHERE id = ?').bind('generating', campaignId).run();
 
-  // Generate emails for this batch
+  // Generate hyper-personalized emails for this batch
   const results: any[] = [];
   for (const account of batch) {
     const a = account as any;
     const ctx = buildAccountContext(a);
     const competitors = getCompetitorMapping(a);
     const competitorCtx = competitors.length > 0
-      ? '\nDetected competitors: ' + competitors.map(m => `${m.competitor} -> CF: ${m.cfProducts[0]}`).join(', ')
+      ? '\nDETECTED COMPETITORS:\n' + competitors.map(m => `- ${m.competitor} (${m.category}) -> CF: ${m.cfProducts.join(', ')}\n  Edge: ${m.pitch}`).join('\n')
       : '';
 
-    const system = `You are a ${personaConfig.title} at Cloudflare writing a campaign email.
-PERSONA: ${personaConfig.name} - ${personaConfig.description}
+    // Build displacement context from full catalog
+    const allProds = [a.cdn_products, a.security_products, a.dns_products, a.cloud_hosting_products].filter(Boolean).join(';').toLowerCase();
+    const displacementLines: string[] = [];
+    for (const [catKey, cat] of Object.entries(CF_PRODUCT_CATALOG)) {
+      for (const comp of cat.competitors) {
+        if (allProds.includes(comp.key) || allProds.includes(comp.name.toLowerCase())) {
+          displacementLines.push(`${comp.name} (${cat.category}) -> Replace with: ${cat.products.slice(0,2).map(p=>p.name).join(', ')} — ${cat.products[0]?.desc || ''}`);
+        }
+      }
+    }
+    const displacementCtx = displacementLines.length ? '\nVENDOR DISPLACEMENT MAP:\n' + displacementLines.map(l => '- ' + l).join('\n') : '';
+
+    // Cost of inaction
+    const cdnS = a.cdn_spend || 0, secS = a.security_spend || 0, dnsS = a.dns_spend || 0;
+    const totalDisplaceable = cdnS + secS + dnsS;
+    const annualSavings = Math.round(totalDisplaceable * 0.3 * 12);
+    const costCtx = totalDisplaceable > 0 ? `\nCOST OF INACTION: $${annualSavings.toLocaleString()}/year in potential savings. CDN: $${cdnS.toLocaleString()}/mo (${a.cdn_primary||'unknown'}), Security: $${secS.toLocaleString()}/mo (${a.security_primary||'unknown'}), DNS: $${dnsS.toLocaleString()}/mo (${a.dns_primary||'unknown'}).` : '';
+
+    // Quick website scrape for personalization (no Puppeteer for speed, just fetch)
+    let websiteQuote = '';
+    const domain = String(a.website || a.website_domain || '');
+    if (domain) {
+      try {
+        const clean = domain.replace(/^https?:\/\//, '').replace(/\/.*/, '');
+        const wr = await fetch(`https://${clean}`, { headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'text/html' }, signal: AbortSignal.timeout(4000), redirect: 'follow' });
+        if (wr.ok) {
+          const html = await wr.text();
+          const metaMatch = html.match(/<meta[^>]*name=["']description["'][^>]*content=["'](.*?)["']/is);
+          if (metaMatch) websiteQuote = `\nFROM THEIR WEBSITE: "${metaMatch[1].trim().slice(0, 200)}"`;
+        }
+      } catch (_) {}
+    }
+
+    const system = `You are a ${personaConfig.title} at Cloudflare writing a hyper-personalized campaign email.
+PERSONA: ${personaConfig.name} — ${personaConfig.description}
 TONE: ${personaConfig.tone}
 CAMPAIGN THEME: ${themeConfig.name}
-RULES: Write a ready-to-send email. Start with Subject: line. Be specific to this account. ${themeConfig.prompt}
-Keep it concise — 200-300 words max. Make every sentence count.`;
 
-    const prompt = `Generate a ${themeConfig.name} campaign email for ${a.account_name}:
+CRITICAL: This email must feel like you spent 30 minutes researching THIS specific account. Reference their actual:
+- Company name, industry, and what they do (use their website description if available)
+- Current vendor stack by name (CDN: ${a.cdn_primary || 'unknown'}, Security: ${a.security_primary || 'unknown'}, DNS: ${a.dns_primary || 'unknown'})
+- IT spend ($${(a.total_it_spend || 0).toLocaleString()}/mo)
+- Specific Cloudflare products that replace their current vendors
+- Quantified savings and cost of inaction
+
+${themeConfig.prompt}
+
+Start with: Subject: [personalized subject with their company name]
+Keep it 250-350 words. Make EVERY sentence specific to this account. No generic filler.`;
+
+    const prompt = `Generate a hyper-personalized ${themeConfig.name} email for ${a.account_name}:
+
+ACCOUNT PROFILE:
 ${ctx}
 ${competitorCtx}
-${campaign.custom_context ? `\nCAMPAIGN CONTEXT: ${campaign.custom_context}` : ''}`;
+${displacementCtx}
+${costCtx}
+${websiteQuote}
+
+CLOUDFLARE PLATFORM EDGE:
+- Network: 330+ cities, 100+ Tbps, sub-50ms global latency
+- Pricing: Flat-rate, no bandwidth charges, zero egress (R2)
+- Platform: CDN + Security + Zero Trust + DNS + Compute + Storage — one vendor
+- Analyst: Gartner SSE Leader, Forrester WAF/CDN/DDoS Leader
+${campaign.custom_context ? '\nCAMPAIGN CONTEXT: ' + campaign.custom_context : ''}`;
 
     try {
       const content = await runAI(c.env.AI, EMAIL_MODEL, system, prompt);
@@ -2331,7 +2375,7 @@ ${campaign.custom_context ? `\nCAMPAIGN CONTEXT: ${campaign.custom_context}` : '
     generated: newGenCount,
     total: campaign.total_accounts,
     batch: results,
-    hasMore: pending.length > 5,
+    hasMore: pendingIds.length > 3,
   });
 });
 

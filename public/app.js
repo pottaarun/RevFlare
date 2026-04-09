@@ -936,8 +936,8 @@ function renderCampaigns(c) {
     for (var i = 0; i < themeKeys.length; i++) {
       var tk = themeKeys[i];
       var t = themes[tk];
-      h += '<div class="research-card" data-theme="' + tk + '">';
-      h += '<div class="research-card-icon" style="background:' + t.color + '15;color:' + t.color + ';border-radius:var(--radius-md);font-size:22px">' + t.icon + '</div>';
+      h += '<div class="research-card" data-theme="' + tk + '" style="background:linear-gradient(135deg,' + t.color + '14,' + t.color + '04);border-color:' + t.color + '25">';
+      h += '<div class="research-card-icon" style="background:' + t.color + '20;color:' + t.color + ';border-radius:var(--radius-md);font-size:22px">' + t.icon + '</div>';
       h += '<div class="research-card-title" style="color:' + t.color + '">' + t.name + '</div>';
       h += '<div class="research-card-desc">' + t.description + '</div></div>';
     }
@@ -960,19 +960,21 @@ function renderCampaigns(c) {
     h += '<div class="persona-section-title" style="margin-top:28px">3. Message Type</div>';
     h += '<div class="msg-types" id="camp-msg-types"><div style="color:var(--text-muted);font-size:13px;padding:8px 0">Select a persona to see message types</div></div>';
 
-    // Step 4: Account Selection
+    // Step 4: Account Selection with checkbox table
     h += '<div class="persona-section-title" style="margin-top:28px">4. Select Accounts</div>';
-    h += '<p style="font-size:12px;color:var(--text-muted);margin-bottom:12px">Search and pick specific accounts, or use filters to target a segment. Each email will be hyper-personalized to the selected account\'s tech stack, competitors, and spend.</p>';
+    h += '<p style="font-size:12px;color:var(--text-muted);margin-bottom:12px">Check the accounts you want to include. Each email will be hyper-personalized with live public intel (news, earnings, website, SEC filings).</p>';
     h += '<div class="toolbar" style="margin-bottom:8px">';
-    h += '<div class="search-wrap">' + IC.search + '<input type="text" class="search-input" id="camp-search" placeholder="Search accounts to add..." /></div>';
+    h += '<div class="search-wrap">' + IC.search + '<input type="text" class="search-input" id="camp-search" placeholder="Filter accounts..." /></div>';
     h += '<select class="filter-select" id="cf-industry"><option value="">All Industries</option>' + (filters.industries || []).map(function(s) { return '<option>' + s + '</option>'; }).join('') + '</select>';
     h += '<select class="filter-select" id="cf-country"><option value="">All Countries</option>' + (filters.countries || []).map(function(s) { return '<option>' + s + '</option>'; }).join('') + '</select>';
     h += '<select class="filter-select" id="cf-spend"><option value="">Any Spend</option><option value="1000">$1K+ /mo</option><option value="10000">$10K+ /mo</option><option value="100000">$100K+ /mo</option><option value="1000000">$1M+ /mo</option></select>';
-    h += '<button class="btn btn-ghost btn-sm" id="add-filtered-btn">Add All Matching</button>';
     h += '</div>';
-    h += '<div id="search-results" style="max-height:200px;overflow-y:auto;margin-bottom:12px"></div>';
-    h += '<div id="selected-accounts" style="margin-bottom:16px"><div style="color:var(--text-muted);font-size:13px;padding:8px 0">No accounts selected yet</div></div>';
-    h += '<div style="font-size:12px;color:var(--text-muted);margin-bottom:20px" id="selected-count">0 accounts selected</div>';
+    h += '<div style="display:flex;align-items:center;gap:12px;margin-bottom:10px">';
+    h += '<label style="font-size:12px;color:var(--accent-bright);cursor:pointer;font-weight:600" id="select-all-label"><input type="checkbox" id="select-all-cb" style="margin-right:6px;accent-color:var(--accent)" />Select All Visible</label>';
+    h += '<span style="font-size:12px;color:var(--text-muted)" id="selected-count">0 selected</span>';
+    h += '<button class="btn btn-ghost btn-sm" id="clear-selection-btn" style="margin-left:auto;font-size:11px">Clear</button>';
+    h += '</div>';
+    h += '<div id="account-table" style="max-height:400px;overflow-y:auto;border:1px solid var(--border-glass);border-radius:var(--radius-md)"></div>';
 
     h += '<div class="persona-section-title" style="margin-top:24px">5. Campaign Name & Context <span style="font-weight:400;color:var(--text-muted);text-transform:none;letter-spacing:0;font-size:11px">(optional)</span></div>';
     h += '<input type="text" class="search-input" id="camp-name" placeholder="Campaign name (e.g. Q1 Security Push - EMEA)" style="margin-bottom:10px;padding-left:14px" />';
@@ -988,104 +990,135 @@ function renderCampaigns(c) {
     var selTheme = null, selPersona = null, selMsg = null;
     var selectedAccountIds = [];
     var selectedAccountMap = {};
+    var allLoadedAccounts = [];
+    var campPage = 1;
 
-    function renderSelectedAccounts() {
-      var el = document.getElementById('selected-accounts');
+    function updateSelectedCount() {
       var countEl = document.getElementById('selected-count');
-      if (!selectedAccountIds.length) {
-        el.innerHTML = '<div style="color:var(--text-muted);font-size:13px;padding:8px 0">No accounts selected yet</div>';
-        countEl.textContent = '0 accounts selected';
-        return;
-      }
-      var chips = '';
-      for (var i = 0; i < selectedAccountIds.length; i++) {
-        var aid = selectedAccountIds[i];
-        var acc = selectedAccountMap[aid];
-        if (!acc) continue;
-        chips += '<span class="stack-chip is-cf" style="cursor:pointer;padding:5px 10px" data-remove="' + aid + '">' + acc.account_name + ' <span style="opacity:0.5;margin-left:4px">\u2715</span></span>';
-      }
-      el.innerHTML = '<div style="display:flex;flex-wrap:wrap;gap:6px">' + chips + '</div>';
-      countEl.innerHTML = '<strong style="color:var(--accent-bright)">' + selectedAccountIds.length + '</strong> accounts selected';
+      if (countEl) countEl.innerHTML = '<strong style="color:var(--accent-bright)">' + selectedAccountIds.length + '</strong> selected';
+    }
 
-      // Remove handlers
-      var removeBtns = el.querySelectorAll('[data-remove]');
-      for (var i = 0; i < removeBtns.length; i++) {
-        (function(btn) {
-          btn.addEventListener('click', function() {
-            var rid = parseInt(btn.getAttribute('data-remove'));
-            selectedAccountIds = selectedAccountIds.filter(function(x) { return x !== rid; });
-            delete selectedAccountMap[rid];
-            renderSelectedAccounts();
+    function renderAccountTable(accounts) {
+      allLoadedAccounts = accounts;
+      var tbl = document.getElementById('account-table');
+      if (!tbl) return;
+      if (!accounts.length) { tbl.innerHTML = '<div style="padding:24px;text-align:center;color:var(--text-muted);font-size:13px">No accounts match filters</div>'; return; }
+
+      var html = '<table style="width:100%"><thead><tr>';
+      html += '<th style="width:40px;padding:8px 12px"><input type="checkbox" id="head-cb" style="accent-color:var(--accent)" /></th>';
+      html += '<th>Account</th><th>Industry</th><th>CDN</th><th>Security</th><th>IT Spend</th><th>Status</th>';
+      html += '</tr></thead><tbody>';
+      for (var i = 0; i < accounts.length; i++) {
+        var a = accounts[i];
+        var checked = selectedAccountIds.indexOf(a.id) >= 0 ? ' checked' : '';
+        html += '<tr style="cursor:pointer" data-row-id="' + a.id + '">';
+        html += '<td style="padding:8px 12px"><input type="checkbox" class="acct-cb" data-id="' + a.id + '" style="accent-color:var(--accent)"' + checked + ' /></td>';
+        html += '<td style="font-weight:600;color:var(--text-primary)">' + a.account_name + '</td>';
+        html += '<td style="font-size:12px;color:var(--text-muted)">' + (a.industry || '--') + '</td>';
+        html += '<td><span class="stack-chip' + ((a.cdn_primary||'').toLowerCase().includes('cloudflare')?' is-cf':'') + '">' + truncate(a.cdn_primary,15) + '</span></td>';
+        html += '<td><span class="stack-chip">' + truncate(a.security_primary,15) + '</span></td>';
+        html += '<td style="font-weight:600">' + fmtD(a.total_it_spend) + '</td>';
+        html += '<td>' + statusPill(a.account_status) + '</td>';
+        html += '</tr>';
+      }
+      html += '</tbody></table>';
+      tbl.innerHTML = html;
+
+      // Row click toggles checkbox
+      var rows = tbl.querySelectorAll('tr[data-row-id]');
+      for (var i = 0; i < rows.length; i++) {
+        (function(row) {
+          row.addEventListener('click', function(e) {
+            if (e.target.type === 'checkbox') return; // let checkbox handle itself
+            var cb = row.querySelector('.acct-cb');
+            if (cb) { cb.checked = !cb.checked; cb.dispatchEvent(new Event('change')); }
           });
-        })(removeBtns[i]);
+        })(rows[i]);
+      }
+
+      // Checkbox handlers
+      var cbs = tbl.querySelectorAll('.acct-cb');
+      for (var i = 0; i < cbs.length; i++) {
+        (function(cb) {
+          cb.addEventListener('change', function() {
+            var aid = parseInt(cb.getAttribute('data-id'));
+            if (cb.checked) {
+              if (selectedAccountIds.indexOf(aid) < 0) {
+                selectedAccountIds.push(aid);
+                var acc = accounts.find(function(a) { return a.id === aid; });
+                if (acc) selectedAccountMap[aid] = acc;
+              }
+            } else {
+              selectedAccountIds = selectedAccountIds.filter(function(x) { return x !== aid; });
+              delete selectedAccountMap[aid];
+            }
+            updateSelectedCount();
+          });
+        })(cbs[i]);
+      }
+
+      // Header checkbox
+      var headCb = document.getElementById('head-cb');
+      if (headCb) {
+        headCb.addEventListener('change', function() {
+          for (var i = 0; i < cbs.length; i++) {
+            cbs[i].checked = headCb.checked;
+            cbs[i].dispatchEvent(new Event('change'));
+          }
+        });
       }
     }
 
-    // Search accounts
-    var searchTimer;
-    var searchInput = document.getElementById('camp-search');
-    searchInput.addEventListener('input', function() {
-      clearTimeout(searchTimer);
-      searchTimer = setTimeout(function() {
-        var q = searchInput.value;
-        if (q.length < 2) { document.getElementById('search-results').innerHTML = ''; return; }
-        api.get('/accounts?search=' + encodeURIComponent(q) + '&limit=20').then(function(d) {
-          var sr = document.getElementById('search-results');
-          if (!d.accounts.length) { sr.innerHTML = '<div style="padding:8px;font-size:12px;color:var(--text-muted)">No matches</div>'; return; }
-          var html = '';
-          for (var i = 0; i < d.accounts.length; i++) {
-            var a = d.accounts[i];
-            var isSelected = selectedAccountIds.indexOf(a.id) >= 0;
-            html += '<div class="search-result-item" data-id="' + a.id + '" style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border-bottom:1px solid var(--border-glass);cursor:pointer;font-size:13px' + (isSelected ? ';opacity:0.4' : '') + '">';
-            html += '<div><strong style="color:var(--text-primary)">' + a.account_name + '</strong> <span style="color:var(--text-muted);font-size:11px">' + (a.industry || '') + ' &middot; ' + fmtD(a.total_it_spend) + '/mo</span></div>';
-            html += '<span style="color:var(--text-muted);font-size:11px">' + (isSelected ? 'Added' : '+ Add') + '</span>';
-            html += '</div>';
-          }
-          sr.innerHTML = '<div style="background:var(--bg-surface);border:1px solid var(--border-glass);border-radius:var(--radius-md);overflow:hidden">' + html + '</div>';
-
-          var items = sr.querySelectorAll('.search-result-item');
-          for (var i = 0; i < items.length; i++) {
-            (function(item, account) {
-              item.addEventListener('click', function() {
-                var aid = parseInt(item.getAttribute('data-id'));
-                if (selectedAccountIds.indexOf(aid) >= 0) return;
-                selectedAccountIds.push(aid);
-                selectedAccountMap[aid] = account;
-                renderSelectedAccounts();
-                item.style.opacity = '0.4';
-                item.querySelector('span:last-child').textContent = 'Added';
-              });
-            })(items[i], d.accounts[i]);
-          }
-        });
-      }, 300);
-    });
-
-    // Add all matching filter results
-    var addFilteredBtn = document.getElementById('add-filtered-btn');
-    addFilteredBtn.addEventListener('click', function() {
-      var params = 'limit=200';
+    // Load accounts with filters
+    function loadCampAccounts() {
+      var params = 'limit=100&sort=total_it_spend&order=DESC&page=' + campPage;
+      var search = document.getElementById('camp-search').value;
       var fInd = document.getElementById('cf-industry').value;
       var fCountry = document.getElementById('cf-country').value;
       var fSpend = document.getElementById('cf-spend').value;
+      if (search) params += '&search=' + encodeURIComponent(search);
       if (fInd) params += '&industry=' + encodeURIComponent(fInd);
       if (fCountry) params += '&country=' + encodeURIComponent(fCountry);
-      if (fSpend) params += '&sort=total_it_spend&order=DESC';
 
-      addFilteredBtn.textContent = 'Loading...';
       api.get('/accounts?' + params).then(function(d) {
-        for (var i = 0; i < d.accounts.length; i++) {
-          var a = d.accounts[i];
-          if (fSpend && (a.total_it_spend || 0) < parseInt(fSpend)) continue;
-          if (selectedAccountIds.indexOf(a.id) < 0) {
-            selectedAccountIds.push(a.id);
-            selectedAccountMap[a.id] = a;
-          }
-        }
-        renderSelectedAccounts();
-        addFilteredBtn.textContent = 'Add All Matching';
-        toast('Added ' + d.accounts.length + ' accounts', 'success');
+        var accounts = d.accounts;
+        if (fSpend) accounts = accounts.filter(function(a) { return (a.total_it_spend || 0) >= parseInt(fSpend); });
+        renderAccountTable(accounts);
       });
+    }
+
+    // Initial load
+    loadCampAccounts();
+
+    // Filter handlers
+    var searchTimer;
+    document.getElementById('camp-search').addEventListener('input', function() { clearTimeout(searchTimer); searchTimer = setTimeout(loadCampAccounts, 300); });
+    document.getElementById('cf-industry').addEventListener('change', loadCampAccounts);
+    document.getElementById('cf-country').addEventListener('change', loadCampAccounts);
+    document.getElementById('cf-spend').addEventListener('change', loadCampAccounts);
+
+    // Select all visible
+    var selectAllCb = document.getElementById('select-all-cb');
+    if (selectAllCb) {
+      selectAllCb.addEventListener('change', function() {
+        var cbs = document.querySelectorAll('.acct-cb');
+        for (var i = 0; i < cbs.length; i++) {
+          cbs[i].checked = selectAllCb.checked;
+          cbs[i].dispatchEvent(new Event('change'));
+        }
+      });
+    }
+
+    // Clear selection
+    document.getElementById('clear-selection-btn').addEventListener('click', function() {
+      selectedAccountIds = [];
+      selectedAccountMap = {};
+      updateSelectedCount();
+      var cbs = document.querySelectorAll('.acct-cb');
+      for (var i = 0; i < cbs.length; i++) cbs[i].checked = false;
+      var headCb = document.getElementById('head-cb');
+      if (headCb) headCb.checked = false;
+      if (selectAllCb) selectAllCb.checked = false;
     });
 
     // Theme selection

@@ -11,6 +11,7 @@ type Bindings = {
   CF_ACCOUNT_ID?: string;
   GOOGLE_CLIENT_ID?: string;
   GOOGLE_CLIENT_SECRET?: string;
+  INTRICATELY_API_KEY?: string; // HG Cloud Dynamics / Intricately API key
 };
 
 const app = new Hono<{ Bindings: Bindings; Variables: { userEmail: string } }>();
@@ -902,7 +903,89 @@ async function searchFunding(companyName: string, domain: string): Promise<strin
   return items.join('\n');
 }
 
-// ── 7. Cloudflare Radar API (requires CF_API_TOKEN secret) ─────────
+// ── 7. Intricately / HG Cloud Dynamics API ─────────────────────────
+async function fetchIntricately(domain: string, apiKey?: string): Promise<{ company: string; spend: string; services: string[]; products: string[]; traffic: string; spendPotential: string; description: string; raw: string }> {
+  const result = { company: '', spend: '', services: [] as string[], products: [] as string[], traffic: '', spendPotential: '', description: '', raw: '' };
+  if (!domain || !apiKey) return result;
+  const clean = domain.replace(/^https?:\/\//, '').replace(/\/.*/, '');
+
+  try {
+    // Step 1: Resolve domain to company slug
+    const lookupRes = await fetch(`https://api.intricately.com/api/v2/companies?domain=${encodeURIComponent(clean)}`, {
+      headers: { 'X-API-KEY': apiKey, 'Accept': 'application/json' },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!lookupRes.ok) return result;
+    const lookup = await lookupRes.json() as any;
+
+    if (lookup.status_code !== 2 || !lookup.slug) {
+      // Report not ready or queued
+      result.raw = `Intricately status: ${lookup.status_message || 'unknown'} for ${clean}`;
+      return result;
+    }
+
+    // Step 2: Fetch full company document
+    const compRes = await fetch(`https://api.intricately.com/api/v2/companies/${lookup.slug}`, {
+      headers: { 'X-API-KEY': apiKey, 'Accept': 'application/json' },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!compRes.ok) return result;
+    const comp = await compRes.json() as any;
+
+    result.company = comp.name || lookup.name || '';
+    result.description = comp.description || '';
+    result.spendPotential = comp.spend_ability?.value || '';
+
+    // Total IT spend
+    if (comp.report?.spend) result.spend = `$${Number(comp.report.spend).toLocaleString()}/mo (Intricately estimate)`;
+    if (comp.report?.spend_range) result.spend += ` — Tier: ${comp.report.spend_range}`;
+
+    // Traffic distribution
+    if (comp.traffic_distribution) {
+      const td = comp.traffic_distribution;
+      result.traffic = `NA: ${td.na ? (td.na * 100).toFixed(0) + '%' : '?'}, EMEA: ${td.emea ? (td.emea * 100).toFixed(0) + '%' : '?'}, APJ: ${td.apj ? (td.apj * 100).toFixed(0) + '%' : '?'}, LATAM: ${td.latam ? (td.latam * 100).toFixed(0) + '%' : '?'}`;
+    }
+
+    // Services (product categories) with spend and vendors
+    if (comp.services?.length) {
+      for (const svc of comp.services) {
+        const svcLine = `${svc.name}: $${(svc.spend || 0).toLocaleString()}/mo (${svc.spend_range || 'unknown tier'}) — ${svc.vendor_count || 0} products`;
+        result.services.push(svcLine);
+
+        // Individual products/vendors
+        if (svc.vendors?.length) {
+          for (const v of svc.vendors) {
+            const prodLine = `  - ${v.name}: $${(v.spend || 0).toLocaleString()}/mo (${v.spend_range || '?'})${v.self_hosted ? ' [self-hosted]' : ''}${v.started_at ? ' [since ' + v.started_at.slice(0, 7) + ']' : ''}`;
+            result.products.push(prodLine);
+          }
+        }
+      }
+    }
+
+    // Build raw summary
+    const lines = [
+      `Company: ${result.company}`,
+      result.description ? `Description: ${result.description}` : '',
+      result.spend ? `Total IT Spend: ${result.spend}` : '',
+      result.spendPotential ? `Spend Potential: ${result.spendPotential}` : '',
+      result.traffic ? `Traffic: ${result.traffic}` : '',
+      comp.employees?.count ? `Employees: ${comp.employees.count.toLocaleString()} (${comp.employees.range || ''})` : '',
+      comp.location ? `HQ: ${[comp.location.city, comp.location.state, comp.location.country].filter(Boolean).join(', ')}` : '',
+      comp.industry?.name ? `Industry: ${comp.industry.name}` : '',
+      comp.linkedin?.url ? `LinkedIn: ${comp.linkedin.url} (${comp.linkedin.followers?.toLocaleString() || '?'} followers)` : '',
+      comp.domains?.count ? `Domains: ${comp.domains.count}` : '',
+      comp.rollups?.product_count ? `Total Products: ${comp.rollups.product_count}` : '',
+      comp.application?.workload_score ? `Application Workload Score: ${comp.application.workload_score}` : '',
+      result.services.length ? `\nProduct Categories:\n${result.services.join('\n')}` : '',
+      result.products.length ? `\nDetailed Product Deployments:\n${result.products.join('\n')}` : '',
+    ].filter(Boolean);
+    result.raw = lines.join('\n');
+
+  } catch (_) {}
+  return result;
+}
+
+// ── 8. Cloudflare Radar API (requires CF_API_TOKEN secret) ─────────
 async function fetchRadarData(domain: string, apiToken?: string, accountId?: string): Promise<{ rank: string; categories: string[]; trafficTrend: string }> {
   const result = { rank: '', categories: [] as string[], trafficTrend: '' };
   if (!domain || !apiToken) return result;
@@ -955,20 +1038,22 @@ interface LiveResearchResult {
   sec: { filings: string; recentFilingText: string };
   news: string;
   funding: string;
+  intricately: { company: string; spend: string; services: string[]; products: string[]; traffic: string; spendPotential: string; description: string; raw: string };
   radar: { rank: string; categories: string[]; trafficTrend: string };
 }
 
-async function runLiveResearch(domain: string, companyName: string, apiToken?: string, accountId?: string, browser?: Fetcher): Promise<LiveResearchResult> {
-  const [website, probe, dns, sec, news, funding, radar] = await Promise.all([
+async function runLiveResearch(domain: string, companyName: string, apiToken?: string, accountId?: string, browser?: Fetcher, intricatelyKey?: string): Promise<LiveResearchResult> {
+  const [website, probe, dns, sec, news, funding, intricately, radar] = await Promise.all([
     scrapeWebsite(domain, browser),
     probeDomain(domain),
     lookupDNS(domain),
     fetchSECFilings(companyName),
     searchNews(companyName),
     searchFunding(companyName, domain),
+    fetchIntricately(domain, intricatelyKey),
     fetchRadarData(domain, apiToken, accountId),
   ]);
-  return { website, probe, dns, sec, news, funding, radar };
+  return { website, probe, dns, sec, news, funding, intricately, radar };
 }
 
 function formatLiveResearch(lr: LiveResearchResult): string {
@@ -1015,6 +1100,12 @@ function formatLiveResearch(lr: LiveResearchResult): string {
   if (lr.news) {
     sections.push('\n## RECENT NEWS (from Google News RSS, real headlines)');
     sections.push(lr.news);
+  }
+
+  // Intricately / HG Cloud Dynamics
+  if (lr.intricately.raw) {
+    sections.push('\n## INTRICATELY / HG CLOUD DYNAMICS (live API data — verified IT spend & product deployments)');
+    sections.push(lr.intricately.raw);
   }
 
   // Funding / Investment
@@ -1117,7 +1208,7 @@ app.post('/api/research/:accountId', async (c) => {
   // Run live research in parallel with data preparation
   const domain = account.website || account.website_domain || '';
   const [liveData] = await Promise.all([
-    runLiveResearch(String(domain), String(account.account_name), c.env.CF_API_TOKEN, c.env.CF_ACCOUNT_ID, c.env.BROWSER),
+    runLiveResearch(String(domain), String(account.account_name), c.env.CF_API_TOKEN, c.env.CF_ACCOUNT_ID, c.env.BROWSER, c.env.INTRICATELY_API_KEY),
   ]);
   const liveCtx = formatLiveResearch(liveData);
 
@@ -1286,6 +1377,7 @@ app.post('/api/live-probe/:accountId', async (c) => {
     { key: 'sec', label: 'SEC EDGAR Filings', fn: () => fetchSECFilings(name) },
     { key: 'news', label: 'News Search', fn: () => searchNews(name) },
     { key: 'funding', label: 'Funding Search', fn: () => searchFunding(name, domain) },
+    { key: 'intricately', label: 'Intricately / HG Data', fn: () => fetchIntricately(domain, c.env.INTRICATELY_API_KEY) },
     { key: 'radar', label: 'Cloudflare Radar', fn: () => fetchRadarData(domain, c.env.CF_API_TOKEN, c.env.CF_ACCOUNT_ID) },
   ];
 
@@ -1302,6 +1394,7 @@ app.post('/api/live-probe/:accountId', async (c) => {
       else if (p.key === 'sec') hasData = !!(data as any).filings;
       else if (p.key === 'news') hasData = !!(data as string);
       else if (p.key === 'funding') hasData = !!(data as string);
+      else if (p.key === 'intricately') hasData = !!(data as any).raw;
       else if (p.key === 'radar') hasData = !!(data as any).rank;
       results[p.key] = { status: hasData ? 'found' : 'empty', data, ms };
     } catch (e: any) {
@@ -1331,6 +1424,7 @@ app.post('/api/live-probe/:accountId', async (c) => {
       else if (p.key === 'sec') detail = (results.sec.data as any).filings?.split('\n')[0]?.slice(0, 80) || 'Filings found';
       else if (p.key === 'news') { const lines = (results.news.data as string).split('\n').filter(Boolean); detail = `${lines.length} headlines found`; }
       else if (p.key === 'funding') { const lines = (results.funding?.data as string || '').split('\n').filter(Boolean); detail = lines.length ? `${lines.length} funding signals` : ''; }
+      else if (p.key === 'intricately') { const d = results.intricately?.data as any; detail = d?.spend ? `${d.company}: ${d.spend}` : (d?.raw ? d.company || 'Data found' : ''); }
       else if (p.key === 'radar') detail = (results.radar.data as any).rank || 'Data found';
     }
     return { key: p.key, label: p.label, status: r.status, detail, ms: r.ms };
@@ -1363,11 +1457,12 @@ app.post('/api/messaging/:accountId', async (c) => {
       sec: prefetchedProbeData.sec?.data || { filings:'', recentFilingText:'' },
       news: prefetchedProbeData.news?.data || '',
       funding: prefetchedProbeData.funding?.data || '',
+      intricately: prefetchedProbeData.intricately?.data || { company:'', spend:'', services:[], products:[], traffic:'', spendPotential:'', description:'', raw:'' },
       radar: prefetchedProbeData.radar?.data || { rank:'', categories:[], trafficTrend:'' },
     };
   } else {
     const domain = String(account.website || account.website_domain || '');
-    liveData = await runLiveResearch(domain, String(account.account_name), c.env.CF_API_TOKEN, c.env.CF_ACCOUNT_ID, c.env.BROWSER);
+    liveData = await runLiveResearch(domain, String(account.account_name), c.env.CF_API_TOKEN, c.env.CF_ACCOUNT_ID, c.env.BROWSER, c.env.INTRICATELY_API_KEY);
   }
   const liveCtx = formatLiveResearch(liveData);
 
@@ -1892,7 +1987,7 @@ app.post('/api/public/:token/research', async (c) => {
   if (!account) return c.json({ error: 'Account not found' }, 404);
 
   const domain = String(account.website || account.website_domain || '');
-  const liveData = await runLiveResearch(domain, String(account.account_name), c.env.CF_API_TOKEN, c.env.CF_ACCOUNT_ID, c.env.BROWSER);
+  const liveData = await runLiveResearch(domain, String(account.account_name), c.env.CF_API_TOKEN, c.env.CF_ACCOUNT_ID, c.env.BROWSER, c.env.INTRICATELY_API_KEY);
   const liveCtx = formatLiveResearch(liveData);
   const ctx = buildAccountContext(account);
   const competitors = getCompetitorMapping(account);

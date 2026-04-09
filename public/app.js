@@ -78,6 +78,8 @@ function navigate(){
   const h=location.hash||'#/';const m=$('#main');
   $$('.nav-link').forEach(l=>l.classList.toggle('active',l.getAttribute('href')===h||(h.startsWith('#/account')&&l.dataset.route==='dashboard')));
   if(h==='#/upload')renderUpload(m);
+  else if(h==='#/campaigns')renderCampaigns(m);
+  else if(h.startsWith('#/campaign/'))renderCampaignDetail(m,h.split('/')[2]);
   else if(h.startsWith('#/share/'))renderShareView(m,h.split('/')[2]);
   else if(h.startsWith('#/account/'))renderAccount(m,h.split('/')[2]);
   else renderDashboard(m);
@@ -85,6 +87,20 @@ function navigate(){
 window.addEventListener('hashchange',navigate);
 window.addEventListener('DOMContentLoaded', function() {
   navigate();
+  // Check Gmail connection status and show in nav
+  api.get('/gmail/status').then(function(g) {
+    window._gmailConnected = g.connected;
+    window._gmailAddress = g.gmailAddress || '';
+    var navRight = document.querySelector('.nav-right');
+    if (navRight) {
+      if (g.connected) {
+        navRight.insertAdjacentHTML('afterbegin', '<span style="font-size:11px;color:var(--green);font-weight:600;padding:4px 10px;background:var(--green-bg);border:1px solid rgba(52,211,153,0.2);border-radius:var(--radius-pill);cursor:default" title="Connected: ' + g.gmailAddress + '">' + IC.mail + ' Gmail</span>');
+      } else {
+        navRight.insertAdjacentHTML('afterbegin', '<a href="/api/gmail/connect" class="btn btn-ghost btn-sm" style="font-size:11px;padding:4px 10px" target="_blank">' + IC.mail + ' Connect Gmail</a>');
+      }
+    }
+  }).catch(function() {});
+
   // Fetch current user and show in nav
   api.get('/me').then(function(u) {
     var ns = document.getElementById('nav-stat');
@@ -797,15 +813,53 @@ async function generateEmail(a, cache) {
   h += '<div class="email-subject-label">Subject</div>';
   h += '<div class="email-subject">' + subject + '</div></div>';
   h += '<div class="email-body">' + md(emailBody) + '</div>';
-  h += '<div class="email-actions">';
-  h += '<button class="btn btn-primary btn-sm" onclick="copyEl(this,\'email\')">' + IC.copy + ' Copy Email</button>';
-  h += '<button class="btn btn-ghost btn-sm" onclick="copyEl(this,\'subject\')" data-subject="' + subject.replace(/"/g, '&quot;') + '">' + IC.mail + ' Copy Subject</button>';
-  h += '<button class="btn btn-accent-ghost btn-sm" id="regen-email">' + IC.sparkles + ' Regenerate</button>';
-  h += '</div></div>';
+    h += '<div class="email-actions">';
+    h += '<button class="btn btn-primary btn-sm" onclick="copyEl(this,\'email\')">' + IC.copy + ' Copy Email</button>';
+    h += '<button class="btn btn-ghost btn-sm" onclick="copyEl(this,\'subject\')" data-subject="' + subject.replace(/"/g, '&quot;') + '">' + IC.mail + ' Copy Subject</button>';
+    if (window._gmailConnected) {
+      h += '<button class="btn btn-sm" style="background:linear-gradient(135deg,#34d399,#10b981);color:#fff" id="send-gmail" data-subject="' + subject.replace(/"/g, '&quot;') + '">' + IC.send + ' Send via Gmail</button>';
+    } else {
+      h += '<a href="/api/gmail/connect" target="_blank" class="btn btn-ghost btn-sm">' + IC.mail + ' Connect Gmail to Send</a>';
+    }
+    h += '<button class="btn btn-accent-ghost btn-sm" id="regen-email">' + IC.sparkles + ' Regenerate</button>';
+    h += '</div></div>';
 
   mo.innerHTML = h;
   if (cache) cache.outputHTML = h;
   mo.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+  var sendGmailBtn = document.getElementById('send-gmail');
+  if (sendGmailBtn) {
+    sendGmailBtn.addEventListener('click', function() {
+      var subj = sendGmailBtn.getAttribute('data-subject') || '';
+      var bodyEl = mo.querySelector('.email-body');
+      var bodyText = bodyEl ? bodyEl.innerText : '';
+      var toAddr = prompt('Send to email address:');
+      if (!toAddr) return;
+      sendGmailBtn.disabled = true;
+      sendGmailBtn.innerHTML = '<div class="spinner" style="width:12px;height:12px;border-width:2px;display:inline-block;vertical-align:middle;margin-right:6px"></div> Sending...';
+      fetch('/api/gmail/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: toAddr, subject: subj, body: bodyText, accountId: a.id }),
+      }).then(function(r) { return r.json(); }).then(function(d) {
+        if (d.success) {
+          sendGmailBtn.innerHTML = '\u2713 Sent!';
+          sendGmailBtn.style.background = 'var(--green)';
+          toast('Email sent to ' + toAddr, 'success');
+        } else {
+          sendGmailBtn.innerHTML = IC.send + ' Failed';
+          toast('Send failed: ' + (d.error || 'Unknown error'), 'error');
+          sendGmailBtn.disabled = false;
+          setTimeout(function() { sendGmailBtn.innerHTML = IC.send + ' Send via Gmail'; }, 2000);
+        }
+      }).catch(function(e) {
+        toast('Error: ' + e.message, 'error');
+        sendGmailBtn.disabled = false;
+        sendGmailBtn.innerHTML = IC.send + ' Send via Gmail';
+      });
+    });
+  }
 
   var regenBtn = document.getElementById('regen-email');
   if (regenBtn) {
@@ -832,6 +886,298 @@ async function tabHistory(c,a){
       $('#hd').scrollIntoView({behavior:'smooth',block:'start'});
     });
   }catch(e){c.innerHTML=`<div style="padding:32px;color:var(--red)">${e.message}</div>`;}
+}
+
+// ══════════════════════════════════════════════════════════════════
+// CAMPAIGNS
+// ══════════════════════════════════════════════════════════════════
+function renderCampaigns(c) {
+  c.innerHTML = '<div class="loading-state"><div class="spinner"></div></div>';
+
+  Promise.all([
+    api.get('/campaign-themes'),
+    api.get('/campaigns'),
+    api.get('/filters'),
+    api.get('/personas'),
+  ]).then(function(res) {
+    var themes = res[0];
+    var campaigns = res[1];
+    var filters = res[2];
+    var personas = res[3];
+
+    var h = '<div class="fade-in">';
+    h += '<div class="page-header"><div class="page-header-row"><div>';
+    h += '<h1 class="page-title">Mass Email Campaigns</h1>';
+    h += '<p class="page-subtitle">Select a theme, persona, and audience filters to generate personalized emails for hundreds of accounts at once.</p>';
+    h += '</div></div></div>';
+
+    // Existing campaigns
+    if (campaigns.length) {
+      h += '<div class="persona-section-title" style="margin-bottom:14px">Your Campaigns</div>';
+      for (var i = 0; i < campaigns.length; i++) {
+        var cp = campaigns[i];
+        var th = themes[cp.theme] || {};
+        var statusColor = cp.status === 'complete' ? 'var(--green)' : cp.status === 'generating' ? 'var(--amber)' : 'var(--text-muted)';
+        h += '<a href="#/campaign/' + cp.id + '" style="text-decoration:none;display:block" class="d-card" style="margin-bottom:12px">';
+        h += '<div style="display:flex;align-items:center;justify-content:space-between">';
+        h += '<div><div style="font-size:15px;font-weight:700;color:var(--text-primary)">' + (th.icon || '') + ' ' + cp.name + '</div>';
+        h += '<div style="font-size:12px;color:var(--text-muted);margin-top:4px">' + (th.name || cp.theme) + ' &middot; ' + (cp.persona || '').toUpperCase() + ' &middot; ' + cp.total_accounts + ' accounts</div></div>';
+        h += '<div style="text-align:right"><div style="font-size:14px;font-weight:700;color:' + statusColor + '">' + cp.generated + '/' + cp.total_accounts + '</div>';
+        h += '<div style="font-size:11px;color:var(--text-muted)">' + cp.status + '</div></div>';
+        h += '</div></a>';
+      }
+      h += '<div style="margin-bottom:32px"></div>';
+    }
+
+    // New campaign builder
+    h += '<div class="persona-section-title">1. Choose Campaign Theme</div>';
+    h += '<div class="research-grid" id="theme-grid">';
+    var themeKeys = Object.keys(themes);
+    for (var i = 0; i < themeKeys.length; i++) {
+      var tk = themeKeys[i];
+      var t = themes[tk];
+      h += '<div class="research-card" data-theme="' + tk + '">';
+      h += '<div class="research-card-icon" style="background:' + t.color + '15;color:' + t.color + ';border-radius:var(--radius-md);font-size:22px">' + t.icon + '</div>';
+      h += '<div class="research-card-title" style="color:' + t.color + '">' + t.name + '</div>';
+      h += '<div class="research-card-desc">' + t.description + '</div></div>';
+    }
+    h += '</div>';
+
+    h += '<div class="persona-section-title" style="margin-top:28px">2. Choose Persona</div>';
+    h += '<div class="persona-grid" id="camp-persona-grid">';
+    var pKeys = Object.keys(personas);
+    for (var i = 0; i < pKeys.length; i++) {
+      var pk = pKeys[i];
+      var p = personas[pk];
+      var pm = PERSONA_META[pk] || {};
+      h += '<div class="persona-card" data-p="' + pk + '">';
+      h += '<div class="persona-avatar">' + (pm.icon || '') + '</div>';
+      h += '<div class="persona-name">' + p.name + '</div>';
+      h += '<div class="persona-role">' + p.title + '</div></div>';
+    }
+    h += '</div>';
+
+    h += '<div class="persona-section-title" style="margin-top:28px">3. Message Type</div>';
+    h += '<div class="msg-types" id="camp-msg-types"><div style="color:var(--text-muted);font-size:13px;padding:8px 0">Select a persona to see message types</div></div>';
+
+    h += '<div class="persona-section-title" style="margin-top:28px">4. Target Audience</div>';
+    h += '<div class="toolbar" style="margin-bottom:8px">';
+    h += '<select class="filter-select" id="cf-industry"><option value="">All Industries</option>' + (filters.industries || []).map(function(s) { return '<option>' + s + '</option>'; }).join('') + '</select>';
+    h += '<select class="filter-select" id="cf-country"><option value="">All Countries</option>' + (filters.countries || []).map(function(s) { return '<option>' + s + '</option>'; }).join('') + '</select>';
+    h += '<select class="filter-select" id="cf-segment"><option value="">All Segments</option>' + (filters.segments || []).map(function(s) { return '<option>' + s + '</option>'; }).join('') + '</select>';
+    h += '<select class="filter-select" id="cf-status"><option value="">All Statuses</option>' + (filters.statuses || []).map(function(s) { return '<option>' + s + '</option>'; }).join('') + '</select>';
+    h += '<select class="filter-select" id="cf-spend"><option value="">Any Spend</option><option value="1000">$1K+ /mo</option><option value="10000">$10K+ /mo</option><option value="100000">$100K+ /mo</option><option value="1000000">$1M+ /mo</option></select>';
+    h += '</div>';
+
+    h += '<div class="persona-section-title" style="margin-top:24px">5. Campaign Name & Context <span style="font-weight:400;color:var(--text-muted);text-transform:none;letter-spacing:0;font-size:11px">(optional)</span></div>';
+    h += '<input type="text" class="search-input" id="camp-name" placeholder="Campaign name (e.g. Q1 Security Push - EMEA)" style="margin-bottom:10px;padding-left:14px" />';
+    h += '<textarea class="context-area" id="camp-context" placeholder="Additional context for all emails: upcoming event, promo, specific angle..."></textarea>';
+
+    h += '<button class="btn btn-primary btn-lg" id="create-campaign-btn" style="width:100%;justify-content:center;padding:16px 24px;font-size:15px;margin-top:12px">' + IC.send + ' Create & Generate Campaign</button>';
+    h += '<div id="camp-status" style="margin-top:24px"></div>';
+    h += '</div>';
+
+    c.innerHTML = h;
+
+    // State
+    var selTheme = null, selPersona = null, selMsg = null;
+
+    // Theme selection
+    var themeCards = document.querySelectorAll('#theme-grid .research-card');
+    for (var i = 0; i < themeCards.length; i++) {
+      (function(card) {
+        card.addEventListener('click', function() {
+          for (var x = 0; x < themeCards.length; x++) themeCards[x].classList.remove('selected');
+          card.classList.add('selected');
+          selTheme = card.getAttribute('data-theme');
+        });
+      })(themeCards[i]);
+    }
+
+    // Persona selection + message types
+    var pCards = document.querySelectorAll('#camp-persona-grid .persona-card');
+    for (var i = 0; i < pCards.length; i++) {
+      (function(card) {
+        card.addEventListener('click', function() {
+          for (var x = 0; x < pCards.length; x++) pCards[x].classList.remove('selected');
+          card.classList.add('selected');
+          selPersona = card.getAttribute('data-p');
+          selMsg = null;
+          var p = personas[selPersona];
+          if (!p) return;
+          var mt = document.getElementById('camp-msg-types');
+          var btnsHtml = '';
+          for (var j = 0; j < p.messageTypes.length; j++) {
+            var t = p.messageTypes[j];
+            btnsHtml += '<button class="msg-type-btn" data-m="' + t.id + '">' + t.label + '</button>';
+          }
+          mt.innerHTML = btnsHtml;
+          var btns = mt.querySelectorAll('.msg-type-btn');
+          for (var j = 0; j < btns.length; j++) {
+            (function(b) {
+              b.addEventListener('click', function() {
+                for (var x = 0; x < btns.length; x++) btns[x].classList.remove('selected');
+                b.classList.add('selected');
+                selMsg = b.getAttribute('data-m');
+              });
+            })(btns[j]);
+          }
+        });
+      })(pCards[i]);
+    }
+
+    // Create campaign
+    var createBtn = document.getElementById('create-campaign-btn');
+    createBtn.addEventListener('click', function() {
+      if (!selTheme) { toast('Select a campaign theme', 'error'); return; }
+      if (!selPersona) { toast('Select a persona', 'error'); return; }
+      if (!selMsg) { toast('Select a message type', 'error'); return; }
+
+      var name = document.getElementById('camp-name').value || (themes[selTheme].name + ' - ' + new Date().toLocaleDateString());
+      var context = document.getElementById('camp-context').value || '';
+      var filterObj = {};
+      var fInd = document.getElementById('cf-industry').value;
+      var fCountry = document.getElementById('cf-country').value;
+      var fSeg = document.getElementById('cf-segment').value;
+      var fStat = document.getElementById('cf-status').value;
+      var fSpend = document.getElementById('cf-spend').value;
+      if (fInd) filterObj.industry = fInd;
+      if (fCountry) filterObj.country = fCountry;
+      if (fSeg) filterObj.segment = fSeg;
+      if (fStat) filterObj.status = fStat;
+      if (fSpend) filterObj.minSpend = parseInt(fSpend);
+
+      createBtn.disabled = true;
+      createBtn.innerHTML = '<div class="spinner" style="width:14px;height:14px;border-width:2px;display:inline-block;vertical-align:middle;margin-right:8px"></div> Creating campaign...';
+
+      api.post('/campaigns', {
+        name: name,
+        theme: selTheme,
+        persona: selPersona,
+        messageType: selMsg,
+        filters: filterObj,
+        customContext: context,
+      }).then(function(result) {
+        toast('Campaign created with ' + result.totalAccounts + ' accounts', 'success');
+        location.hash = '#/campaign/' + result.id;
+      }).catch(function(err) {
+        toast('Error: ' + err.message, 'error');
+        createBtn.disabled = false;
+        createBtn.innerHTML = IC.send + ' Create & Generate Campaign';
+      });
+    });
+
+  }).catch(function(err) {
+    c.innerHTML = '<div style="padding:32px;color:var(--red)">' + err.message + '</div>';
+  });
+}
+
+// ── Campaign Detail (generation + preview) ────────────────────────
+function renderCampaignDetail(c, id) {
+  c.innerHTML = '<div class="loading-state"><div class="spinner"></div></div>';
+
+  api.get('/campaigns/' + id + '/emails').then(function(data) {
+    var cp = data.campaign;
+    var emails = data.emails;
+
+    var h = '<div class="fade-in">';
+    h += '<a href="#/campaigns" class="back-link">' + IC.back + ' All Campaigns</a>';
+
+    // Campaign header
+    h += '<div class="acct-hero">';
+    h += '<div class="acct-hero-top"><div>';
+    h += '<h1 class="acct-name">' + cp.name + '</h1>';
+    h += '<div class="acct-meta-row" style="margin-top:8px">';
+    h += '<span class="pill pill-active">' + cp.theme + '</span>';
+    h += '<span class="acct-meta-item">' + (cp.persona || '').toUpperCase() + ' / ' + cp.message_type + '</span>';
+    h += '<span class="acct-meta-item">' + cp.total_accounts + ' accounts</span>';
+    h += '</div></div>';
+    h += '<div style="text-align:right"><div class="acct-kpi-value green">' + cp.generated + '/' + cp.total_accounts + '</div><div style="font-size:11px;color:var(--text-muted)">generated</div></div>';
+    h += '</div></div>';
+
+    // Generate button
+    if (cp.generated < cp.total_accounts) {
+      h += '<button class="btn btn-primary btn-lg" id="gen-batch-btn" style="width:100%;justify-content:center;padding:14px 24px;font-size:15px;margin-bottom:8px">' + IC.sparkles + ' Generate Next Batch (5 emails)</button>';
+      h += '<div id="gen-progress" style="margin-bottom:24px"></div>';
+    }
+
+    // Export button
+    if (emails.length) {
+      h += '<div style="display:flex;gap:8px;margin-bottom:24px">';
+      h += '<a href="/api/campaigns/' + id + '/export" class="btn btn-ghost">' + IC.copy + ' Export CSV</a>';
+      h += '<button class="btn btn-ghost" id="copy-all-btn">' + IC.copy + ' Copy All Emails</button>';
+      h += '</div>';
+    }
+
+    // Email list
+    h += '<div class="persona-section-title">Generated Emails (' + emails.length + ')</div>';
+    for (var i = 0; i < emails.length; i++) {
+      var e = emails[i];
+      var body = (e.content || '').replace(/^Subject:.*\n*/im, '');
+      h += '<div class="email-preview" style="margin-bottom:14px">';
+      h += '<div class="email-toolbar"><div class="email-dot r"></div><div class="email-dot y"></div><div class="email-dot g"></div>';
+      h += '<span style="margin-left:auto;font-size:11px;color:var(--text-muted);font-weight:600">' + e.account_name + '</span></div>';
+      h += '<div class="email-subject-bar"><div class="email-subject-label">Subject</div><div class="email-subject">' + (e.subject || '') + '</div></div>';
+      h += '<div class="email-body" style="max-height:200px;overflow:hidden;position:relative">' + md(body);
+      h += '<div style="position:absolute;bottom:0;left:0;right:0;height:60px;background:linear-gradient(transparent,var(--bg-surface))"></div>';
+      h += '</div>';
+      h += '<div class="email-actions"><button class="btn btn-primary btn-sm" onclick="copyEl(this,\'email\')">' + IC.copy + ' Copy</button>';
+      h += '<button class="btn btn-ghost btn-sm" onclick="this.closest(\'.email-preview\').querySelector(\'.email-body\').style.maxHeight=\'none\';this.closest(\'.email-preview\').querySelector(\'.email-body div\').style.display=\'none\';this.textContent=\'Expanded\'">Expand</button></div>';
+      h += '</div>';
+    }
+
+    h += '</div>';
+    c.innerHTML = h;
+
+    // Generate batch handler
+    var genBtn = document.getElementById('gen-batch-btn');
+    if (genBtn) {
+      genBtn.addEventListener('click', function runBatch() {
+        genBtn.disabled = true;
+        genBtn.innerHTML = '<div class="spinner" style="width:14px;height:14px;border-width:2px;display:inline-block;vertical-align:middle;margin-right:8px"></div> Generating batch...';
+        var prog = document.getElementById('gen-progress');
+
+        api.post('/campaigns/' + id + '/generate', {}).then(function(result) {
+          if (prog) prog.innerHTML = '<div style="font-size:13px;color:var(--text-secondary)">' + result.generated + '/' + result.total + ' emails generated. ' + (result.hasMore ? 'More accounts pending.' : 'All done!') + '</div>';
+
+          if (result.hasMore) {
+            genBtn.disabled = false;
+            genBtn.innerHTML = IC.sparkles + ' Generate Next Batch (' + Math.min(5, result.total - result.generated) + ' emails)';
+          } else {
+            genBtn.innerHTML = '\u2713 Campaign Complete';
+            genBtn.classList.remove('btn-primary');
+            genBtn.classList.add('btn-ghost');
+          }
+
+          // Refresh to show new emails
+          if (result.batch && result.batch.length) {
+            setTimeout(function() { renderCampaignDetail(document.getElementById('main'), id); }, 500);
+          }
+        }).catch(function(err) {
+          if (prog) prog.innerHTML = '<div style="color:var(--red);font-size:13px">Error: ' + err.message + '</div>';
+          genBtn.disabled = false;
+          genBtn.innerHTML = IC.sparkles + ' Retry Batch';
+        });
+      });
+    }
+
+    // Copy all
+    var copyAllBtn = document.getElementById('copy-all-btn');
+    if (copyAllBtn) {
+      copyAllBtn.addEventListener('click', function() {
+        var allText = emails.map(function(e) {
+          return 'TO: ' + e.account_name + '\n' + e.content + '\n---\n';
+        }).join('\n');
+        navigator.clipboard.writeText(allText).then(function() {
+          copyAllBtn.innerHTML = IC.copy + ' Copied ' + emails.length + ' emails!';
+          setTimeout(function() { copyAllBtn.innerHTML = IC.copy + ' Copy All Emails'; }, 2000);
+        });
+      });
+    }
+
+  }).catch(function(err) {
+    c.innerHTML = '<div style="padding:32px;color:var(--red)">' + err.message + '</div>';
+  });
 }
 
 // ══════════════════════════════════════════════════════════════════

@@ -6,9 +6,11 @@ import puppeteer from '@cloudflare/puppeteer';
 type Bindings = {
   DB: D1Database;
   AI: Ai;
-  BROWSER: Fetcher; // Cloudflare Browser Rendering API
+  BROWSER: Fetcher;
   CF_API_TOKEN?: string;
   CF_ACCOUNT_ID?: string;
+  GOOGLE_CLIENT_ID?: string;
+  GOOGLE_CLIENT_SECRET?: string;
 };
 
 const app = new Hono<{ Bindings: Bindings; Variables: { userEmail: string } }>();
@@ -1904,6 +1906,464 @@ app.post('/api/public/:token/research', async (c) => {
 
   const content = await runAI(c.env.AI, RESEARCH_MODEL, system, prompt);
   return c.json({ title: `Research: ${account.account_name}`, content, type: 'shared_research' });
+});
+
+// ══════════════════════════════════════════════════════════════════
+// GMAIL AGENT — OAuth + Send
+// ══════════════════════════════════════════════════════════════════
+
+const GMAIL_SCOPES = 'https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/userinfo.email';
+
+// Check if Gmail is connected
+app.get('/api/gmail/status', async (c) => {
+  const email = c.get('userEmail');
+  const token = await c.env.DB.prepare('SELECT gmail_address, expires_at FROM gmail_tokens WHERE user_email = ?').bind(email).first() as any;
+  if (!token) return c.json({ connected: false });
+  return c.json({ connected: true, gmailAddress: token.gmail_address, expired: token.expires_at < Date.now() / 1000 });
+});
+
+// Start OAuth flow
+app.get('/api/gmail/connect', async (c) => {
+  const clientId = c.env.GOOGLE_CLIENT_ID;
+  if (!clientId) return c.json({ error: 'GOOGLE_CLIENT_ID not configured. Set it via: wrangler secret put GOOGLE_CLIENT_ID' }, 500);
+
+  const redirectUri = new URL('/api/gmail/callback', c.req.url).toString();
+  const state = c.get('userEmail'); // Pass user email as state
+
+  const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?` +
+    `client_id=${encodeURIComponent(clientId)}` +
+    `&redirect_uri=${encodeURIComponent(redirectUri)}` +
+    `&response_type=code` +
+    `&scope=${encodeURIComponent(GMAIL_SCOPES)}` +
+    `&access_type=offline` +
+    `&prompt=consent` +
+    `&state=${encodeURIComponent(state)}`;
+
+  return c.redirect(authUrl);
+});
+
+// OAuth callback
+app.get('/api/gmail/callback', async (c) => {
+  const code = c.req.query('code');
+  const userEmail = c.req.query('state') || c.get('userEmail');
+  if (!code) return c.html('<h2>Authorization failed</h2><p>No code received.</p>');
+
+  const clientId = c.env.GOOGLE_CLIENT_ID;
+  const clientSecret = c.env.GOOGLE_CLIENT_SECRET;
+  if (!clientId || !clientSecret) return c.html('<h2>Server misconfigured</h2>');
+
+  const redirectUri = new URL('/api/gmail/callback', c.req.url).toString();
+
+  // Exchange code for tokens
+  const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      code,
+      client_id: clientId,
+      client_secret: clientSecret,
+      redirect_uri: redirectUri,
+      grant_type: 'authorization_code',
+    }),
+  });
+
+  if (!tokenRes.ok) {
+    const err = await tokenRes.text();
+    return c.html(`<h2>Token exchange failed</h2><pre>${err}</pre>`);
+  }
+
+  const tokens = await tokenRes.json() as any;
+
+  // Get Gmail address
+  const profileRes = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
+    headers: { 'Authorization': `Bearer ${tokens.access_token}` },
+  });
+  const profile = await profileRes.json() as any;
+
+  // Store tokens
+  await c.env.DB.prepare(`
+    INSERT INTO gmail_tokens (user_email, access_token, refresh_token, gmail_address, expires_at)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(user_email) DO UPDATE SET
+      access_token = excluded.access_token,
+      refresh_token = COALESCE(excluded.refresh_token, gmail_tokens.refresh_token),
+      gmail_address = excluded.gmail_address,
+      expires_at = excluded.expires_at
+  `).bind(
+    userEmail,
+    tokens.access_token,
+    tokens.refresh_token || '',
+    profile.email || '',
+    Math.floor(Date.now() / 1000) + (tokens.expires_in || 3600),
+  ).run();
+
+  return c.html(`
+    <html><body style="background:#08090a;color:#f7f8f8;font-family:Inter,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;text-align:center">
+      <div>
+        <h2 style="color:#34d399">Gmail Connected!</h2>
+        <p>${profile.email} is now linked to RevFlare.</p>
+        <p>You can close this window and return to RevFlare.</p>
+        <script>setTimeout(function(){ window.close(); }, 2000);</script>
+      </div>
+    </body></html>
+  `);
+});
+
+// Refresh token helper
+async function refreshGmailToken(db: D1Database, userEmail: string, clientId: string, clientSecret: string): Promise<string | null> {
+  const stored = await db.prepare('SELECT * FROM gmail_tokens WHERE user_email = ?').bind(userEmail).first() as any;
+  if (!stored || !stored.refresh_token) return null;
+
+  // If not expired, return existing
+  if (stored.expires_at > Date.now() / 1000 + 60) return stored.access_token;
+
+  // Refresh
+  const res = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      refresh_token: stored.refresh_token,
+      client_id: clientId,
+      client_secret: clientSecret,
+      grant_type: 'refresh_token',
+    }),
+  });
+
+  if (!res.ok) return null;
+  const data = await res.json() as any;
+
+  await db.prepare('UPDATE gmail_tokens SET access_token = ?, expires_at = ? WHERE user_email = ?')
+    .bind(data.access_token, Math.floor(Date.now() / 1000) + (data.expires_in || 3600), userEmail).run();
+
+  return data.access_token;
+}
+
+// Send email via Gmail API
+app.post('/api/gmail/send', async (c) => {
+  const email = c.get('userEmail');
+  const { to, subject, body, accountId } = await c.req.json<{ to: string; subject: string; body: string; accountId?: number }>();
+
+  if (!to || !subject || !body) return c.json({ error: 'Missing to, subject, or body' }, 400);
+  if (!c.env.GOOGLE_CLIENT_ID || !c.env.GOOGLE_CLIENT_SECRET) return c.json({ error: 'Gmail not configured on server' }, 500);
+
+  const accessToken = await refreshGmailToken(c.env.DB, email, c.env.GOOGLE_CLIENT_ID, c.env.GOOGLE_CLIENT_SECRET);
+  if (!accessToken) return c.json({ error: 'Gmail not connected. Click Connect Gmail first.' }, 401);
+
+  const stored = await c.env.DB.prepare('SELECT gmail_address FROM gmail_tokens WHERE user_email = ?').bind(email).first() as any;
+  const from = stored?.gmail_address || email;
+
+  // Build RFC 2822 email
+  const rawEmail = [
+    `From: ${from}`,
+    `To: ${to}`,
+    `Subject: ${subject}`,
+    `Content-Type: text/plain; charset=utf-8`,
+    '',
+    body.replace(/<[^>]+>/g, '').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"'),
+  ].join('\r\n');
+
+  // Base64url encode
+  const encoded = btoa(unescape(encodeURIComponent(rawEmail)))
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+  const sendRes = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ raw: encoded }),
+  });
+
+  if (!sendRes.ok) {
+    const err = await sendRes.json() as any;
+    return c.json({ error: err.error?.message || 'Gmail send failed' }, sendRes.status);
+  }
+
+  const result = await sendRes.json() as any;
+  return c.json({ success: true, messageId: result.id, threadId: result.threadId });
+});
+
+// Bulk send campaign emails
+app.post('/api/gmail/send-campaign/:campaignId', async (c) => {
+  const campaignId = c.req.param('campaignId');
+  const email = c.get('userEmail');
+  const { emailIds, toField } = await c.req.json<{ emailIds: number[]; toField: string }>();
+
+  if (!c.env.GOOGLE_CLIENT_ID || !c.env.GOOGLE_CLIENT_SECRET) return c.json({ error: 'Gmail not configured' }, 500);
+
+  const accessToken = await refreshGmailToken(c.env.DB, email, c.env.GOOGLE_CLIENT_ID, c.env.GOOGLE_CLIENT_SECRET);
+  if (!accessToken) return c.json({ error: 'Gmail not connected' }, 401);
+
+  const stored = await c.env.DB.prepare('SELECT gmail_address FROM gmail_tokens WHERE user_email = ?').bind(email).first() as any;
+  const from = stored?.gmail_address || email;
+
+  const results: { id: number; status: string; error?: string }[] = [];
+
+  for (const eid of emailIds.slice(0, 10)) { // Max 10 per batch
+    const em = await c.env.DB.prepare('SELECT * FROM campaign_emails WHERE id = ? AND campaign_id = ?').bind(eid, campaignId).first() as any;
+    if (!em) { results.push({ id: eid, status: 'not_found' }); continue; }
+
+    const bodyText = (em.content || '').replace(/^Subject:.*\n*/im, '').replace(/<[^>]+>/g, '').replace(/&amp;/g, '&');
+    const rawEmail = [`From: ${from}`, `To: ${toField}`, `Subject: ${em.subject}`, `Content-Type: text/plain; charset=utf-8`, '', bodyText].join('\r\n');
+    const encoded = btoa(unescape(encodeURIComponent(rawEmail))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+    try {
+      const sendRes = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ raw: encoded }),
+      });
+      if (sendRes.ok) {
+        await c.env.DB.prepare('UPDATE campaign_emails SET status = ? WHERE id = ?').bind('sent', eid).run();
+        results.push({ id: eid, status: 'sent' });
+      } else {
+        const err = await sendRes.json() as any;
+        results.push({ id: eid, status: 'error', error: err.error?.message });
+      }
+    } catch (e: any) {
+      results.push({ id: eid, status: 'error', error: e.message });
+    }
+  }
+
+  return c.json({ results, sent: results.filter(r => r.status === 'sent').length });
+});
+
+// Disconnect Gmail
+app.delete('/api/gmail/disconnect', async (c) => {
+  const email = c.get('userEmail');
+  await c.env.DB.prepare('DELETE FROM gmail_tokens WHERE user_email = ?').bind(email).run();
+  return c.json({ success: true });
+});
+
+// ══════════════════════════════════════════════════════════════════
+// MASS CAMPAIGN ENGINE
+// ══════════════════════════════════════════════════════════════════
+
+const CAMPAIGN_THEMES: Record<string, { name: string; icon: string; color: string; description: string; prompt: string }> = {
+  security_posture: {
+    name: 'Security Posture Review',
+    icon: '\u{1F6E1}',
+    color: '#f87171',
+    description: 'Alert prospects about security gaps found in their infrastructure. Position Cloudflare WAF, DDoS, Bot Management, Zero Trust.',
+    prompt: 'Focus the email on SECURITY. Reference any missing security headers found in their live probe, their current security vendor, and position Cloudflare as the integrated security platform. Mention: average breach cost $4.45M (IBM), DDoS downtime $5,600/minute (Gartner). Urgency: threat landscape is evolving faster than point solutions can adapt.',
+  },
+  cost_optimization: {
+    name: 'Cost Optimization',
+    icon: '\u{1F4B0}',
+    color: '#34d399',
+    description: 'Help customers reduce IT spend through vendor consolidation and Cloudflare\'s flat-rate pricing model.',
+    prompt: 'Focus the email on COST SAVINGS. Calculate their total displaceable spend across CDN, Security, DNS. Position Cloudflare\'s flat-rate pricing (no bandwidth charges, no surge pricing, zero egress on R2). Quantify annual savings. Frame it as: "every month you wait costs $X in unnecessary vendor overhead."',
+  },
+  vendor_consolidation: {
+    name: 'Vendor Consolidation',
+    icon: '\u{1F504}',
+    color: '#a78bfa',
+    description: 'Pitch consolidating multiple point solutions into Cloudflare\'s unified platform.',
+    prompt: 'Focus on VENDOR CONSOLIDATION. Count how many separate IT products they use and position Cloudflare as the single platform replacement. Benefits: one dashboard, one vendor, unified analytics, faster incident response, reduced procurement overhead. Reference their actual vendor list.',
+  },
+  digital_transformation: {
+    name: 'Digital Transformation',
+    icon: '\u{1F680}',
+    color: '#60a5fa',
+    description: 'Position Cloudflare as the infrastructure foundation for digital transformation and AI readiness.',
+    prompt: 'Focus on DIGITAL TRANSFORMATION and AI READINESS. Position Cloudflare Workers as edge compute, R2 as zero-egress storage, Workers AI for edge inference, Vectorize for AI apps. Frame their current legacy infrastructure as a blocker to innovation. Their competitors are already building at the edge.',
+  },
+  performance_edge: {
+    name: 'Performance & Speed',
+    icon: '\u{26A1}',
+    color: '#fbbf24',
+    description: 'Focus on performance gains — faster load times, lower latency, better user experience.',
+    prompt: 'Focus on PERFORMANCE. Cloudflare\'s 330+ city network delivers sub-50ms latency globally. Reference Google research: every 100ms of latency costs 1% of revenue. Position Argo Smart Routing (30%+ latency reduction), Early Hints, Speed Brain, Zaraz. Compare to their current CDN provider.',
+  },
+  zero_trust_modernization: {
+    name: 'Zero Trust Modernization',
+    icon: '\u{1F512}',
+    color: '#f472b6',
+    description: 'Replace legacy VPN and SASE with Cloudflare Zero Trust — Access, Gateway, WARP, Browser Isolation.',
+    prompt: 'Focus on ZERO TRUST. Legacy VPNs are the #1 attack vector. Position Cloudflare Access (identity-aware proxy), Gateway (SWG), WARP (device agent), Browser Isolation, CASB, DLP. Reference Forrester Wave SSE Leader recognition. Frame VPN replacement as urgent security modernization.',
+  },
+  competitive_displacement: {
+    name: 'Competitive Displacement',
+    icon: '\u{1F3AF}',
+    color: '#fb923c',
+    description: 'Target accounts using specific competitors (Akamai, CloudFront, Zscaler, etc.) with displacement messaging.',
+    prompt: 'Focus on COMPETITIVE DISPLACEMENT. Name their current vendor explicitly. Explain why Cloudflare is the better choice with specific advantages: larger network, better pricing, integrated platform, faster innovation. Include a vendor-by-vendor displacement map for every competitor in their stack.',
+  },
+  ai_edge: {
+    name: 'AI at the Edge',
+    icon: '\u{1F916}',
+    color: '#818cf8',
+    description: 'Position Workers AI, Vectorize, AI Gateway for companies building AI-powered products.',
+    prompt: 'Focus on AI INFRASTRUCTURE. Position Workers AI (inference at the edge, 0ms cold starts), Vectorize (vector database), AI Gateway (LLM caching, rate limiting, logging). Frame: running AI centralized = high latency + high cost. Edge AI = faster, cheaper, better UX. Cloudflare is the only platform offering compute + storage + AI + CDN + security in one.',
+  },
+};
+
+// List campaigns
+app.get('/api/campaigns', async (c) => {
+  const email = c.get('userEmail');
+  const campaigns = await c.env.DB.prepare(
+    'SELECT * FROM campaigns WHERE user_email = ? ORDER BY created_at DESC'
+  ).bind(email).all();
+  return c.json(campaigns.results);
+});
+
+// Get campaign themes
+app.get('/api/campaign-themes', (c) => c.json(CAMPAIGN_THEMES));
+
+// Create campaign
+app.post('/api/campaigns', async (c) => {
+  const email = c.get('userEmail');
+  const { name, theme, persona, messageType, filters, customContext } = await c.req.json<{
+    name: string; theme: string; persona: string; messageType: string; filters?: any; customContext?: string;
+  }>();
+
+  if (!CAMPAIGN_THEMES[theme]) return c.json({ error: 'Invalid theme' }, 400);
+  if (!PERSONA_CONFIGS[persona]) return c.json({ error: 'Invalid persona' }, 400);
+
+  // Count matching accounts
+  let where = 'WHERE user_email = ?';
+  const params: any[] = [email];
+  if (filters?.industry) { where += ' AND industry = ?'; params.push(filters.industry); }
+  if (filters?.country) { where += ' AND billing_country = ?'; params.push(filters.country); }
+  if (filters?.segment) { where += ' AND account_segment = ?'; params.push(filters.segment); }
+  if (filters?.status) { where += ' AND account_status = ?'; params.push(filters.status); }
+  if (filters?.minSpend) { where += ' AND total_it_spend >= ?'; params.push(filters.minSpend); }
+
+  const countResult = await c.env.DB.prepare(
+    `SELECT COUNT(*) as cnt FROM accounts ${where}`
+  ).bind(...params).first() as any;
+
+  const totalAccounts = countResult?.cnt || 0;
+
+  const result = await c.env.DB.prepare(
+    'INSERT INTO campaigns (name, theme, persona, message_type, filters, total_accounts, status, custom_context, user_email) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+  ).bind(name, theme, persona, messageType, JSON.stringify(filters || {}), totalAccounts, 'draft', customContext || '', email).run();
+
+  return c.json({ id: result.meta.last_row_id, totalAccounts });
+});
+
+// Generate campaign emails (processes accounts in batches)
+app.post('/api/campaigns/:id/generate', async (c) => {
+  const campaignId = c.req.param('id');
+  const email = c.get('userEmail');
+
+  const campaign = await c.env.DB.prepare(
+    'SELECT * FROM campaigns WHERE id = ? AND user_email = ?'
+  ).bind(campaignId, email).first() as any;
+  if (!campaign) return c.json({ error: 'Campaign not found' }, 404);
+
+  const themeConfig = CAMPAIGN_THEMES[campaign.theme];
+  const personaConfig = PERSONA_CONFIGS[campaign.persona];
+  if (!themeConfig || !personaConfig) return c.json({ error: 'Invalid campaign config' }, 400);
+
+  // Get accounts matching filters
+  const filters = JSON.parse(campaign.filters || '{}');
+  let where = 'WHERE user_email = ?';
+  const params: any[] = [email];
+  if (filters.industry) { where += ' AND industry = ?'; params.push(filters.industry); }
+  if (filters.country) { where += ' AND billing_country = ?'; params.push(filters.country); }
+  if (filters.segment) { where += ' AND account_segment = ?'; params.push(filters.segment); }
+  if (filters.status) { where += ' AND account_status = ?'; params.push(filters.status); }
+  if (filters.minSpend) { where += ' AND total_it_spend >= ?'; params.push(filters.minSpend); }
+
+  // Get batch of accounts not yet generated
+  const alreadyGenerated = await c.env.DB.prepare(
+    'SELECT account_id FROM campaign_emails WHERE campaign_id = ?'
+  ).bind(campaignId).all();
+  const generatedIds = new Set(alreadyGenerated.results.map((r: any) => r.account_id));
+
+  const accounts = await c.env.DB.prepare(
+    `SELECT * FROM accounts ${where} ORDER BY total_it_spend DESC LIMIT 200`
+  ).bind(...params).all();
+
+  const pending = accounts.results.filter((a: any) => !generatedIds.has(a.id));
+  const batch = pending.slice(0, 5); // Process 5 at a time
+
+  if (!batch.length) {
+    await c.env.DB.prepare('UPDATE campaigns SET status = ? WHERE id = ?').bind('complete', campaignId).run();
+    return c.json({ status: 'complete', generated: generatedIds.size, total: campaign.total_accounts });
+  }
+
+  await c.env.DB.prepare('UPDATE campaigns SET status = ? WHERE id = ?').bind('generating', campaignId).run();
+
+  // Generate emails for this batch
+  const results: any[] = [];
+  for (const account of batch) {
+    const a = account as any;
+    const ctx = buildAccountContext(a);
+    const competitors = getCompetitorMapping(a);
+    const competitorCtx = competitors.length > 0
+      ? '\nDetected competitors: ' + competitors.map(m => `${m.competitor} -> CF: ${m.cfProducts[0]}`).join(', ')
+      : '';
+
+    const system = `You are a ${personaConfig.title} at Cloudflare writing a campaign email.
+PERSONA: ${personaConfig.name} - ${personaConfig.description}
+TONE: ${personaConfig.tone}
+CAMPAIGN THEME: ${themeConfig.name}
+RULES: Write a ready-to-send email. Start with Subject: line. Be specific to this account. ${themeConfig.prompt}
+Keep it concise — 200-300 words max. Make every sentence count.`;
+
+    const prompt = `Generate a ${themeConfig.name} campaign email for ${a.account_name}:
+${ctx}
+${competitorCtx}
+${campaign.custom_context ? `\nCAMPAIGN CONTEXT: ${campaign.custom_context}` : ''}`;
+
+    try {
+      const content = await runAI(c.env.AI, EMAIL_MODEL, system, prompt);
+      const subject = content.match(/Subject:?\s*(.+?)(?:\n|$)/i)?.[1]?.trim() || `${themeConfig.name} - ${a.account_name}`;
+
+      await c.env.DB.prepare(
+        'INSERT INTO campaign_emails (campaign_id, account_id, account_name, subject, content, status) VALUES (?, ?, ?, ?, ?, ?)'
+      ).bind(campaignId, a.id, a.account_name, subject, content, 'generated').run();
+
+      results.push({ accountId: a.id, accountName: a.account_name, subject, status: 'generated' });
+    } catch (e: any) {
+      results.push({ accountId: a.id, accountName: a.account_name, status: 'error', error: e.message });
+    }
+  }
+
+  const newGenCount = generatedIds.size + results.filter(r => r.status === 'generated').length;
+  await c.env.DB.prepare('UPDATE campaigns SET generated = ? WHERE id = ?').bind(newGenCount, campaignId).run();
+
+  return c.json({
+    status: 'generating',
+    generated: newGenCount,
+    total: campaign.total_accounts,
+    batch: results,
+    hasMore: pending.length > 5,
+  });
+});
+
+// Get campaign emails
+app.get('/api/campaigns/:id/emails', async (c) => {
+  const campaignId = c.req.param('id');
+  const email = c.get('userEmail');
+  const campaign = await c.env.DB.prepare('SELECT * FROM campaigns WHERE id = ? AND user_email = ?').bind(campaignId, email).first();
+  if (!campaign) return c.json({ error: 'Campaign not found' }, 404);
+  const emails = await c.env.DB.prepare(
+    'SELECT * FROM campaign_emails WHERE campaign_id = ? ORDER BY created_at ASC'
+  ).bind(campaignId).all();
+  return c.json({ campaign, emails: emails.results });
+});
+
+// Export campaign as CSV
+app.get('/api/campaigns/:id/export', async (c) => {
+  const campaignId = c.req.param('id');
+  const email = c.get('userEmail');
+  const campaign = await c.env.DB.prepare('SELECT * FROM campaigns WHERE id = ? AND user_email = ?').bind(campaignId, email).first();
+  if (!campaign) return c.json({ error: 'Campaign not found' }, 404);
+  const emails = await c.env.DB.prepare(
+    'SELECT account_name, subject, content FROM campaign_emails WHERE campaign_id = ? AND status = ? ORDER BY created_at ASC'
+  ).bind(campaignId, 'generated').all();
+
+  let csv = 'Account Name,Subject,Email Body\n';
+  for (const e of emails.results as any[]) {
+    const body = (e.content || '').replace(/^Subject:.*\n*/im, '').replace(/"/g, '""').replace(/\n/g, ' ');
+    csv += `"${e.account_name}","${e.subject}","${body}"\n`;
+  }
+
+  return new Response(csv, { headers: { 'Content-Type': 'text/csv', 'Content-Disposition': `attachment; filename="campaign-${campaignId}.csv"` } });
 });
 
 // ── Catalog endpoint: return full CF product catalog for browsing ───

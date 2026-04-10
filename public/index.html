@@ -41,7 +41,9 @@
               + '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px"><h2 style="color:#f7f8f8;font-size:20px;font-weight:700;margin:0">Connect Gmail</h2><button id="wiz-close" style="background:none;border:none;color:#5a5e66;cursor:pointer;font-size:20px">\u2715</button></div>'
               + '<div style="background:rgba(94,106,210,0.08);border:1px solid rgba(124,127,255,0.15);border-radius:10px;padding:14px;margin-bottom:20px;font-size:13px">Send emails directly from your Gmail. Secure OAuth &mdash; send-only permission.</div>'
 
-              // Step 1-3: Instructions
+              + '<div id="wiz-check" style="margin-bottom:20px;text-align:center;padding:16px"><div style="width:20px;height:20px;border:2px solid rgba(255,255,255,0.08);border-top-color:#7c7fff;border-radius:50%;animation:spin 0.6s linear infinite;margin:0 auto 8px"></div><div style="font-size:12px;color:#5a5e66">Checking configuration...</div></div>'
+
+              // Step 1: Instructions
               + '<div style="margin-bottom:16px;padding:14px;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.06);border-radius:8px">'
               + '<div style="color:#60a5fa;font-weight:700;font-size:12px;margin-bottom:8px">1. CREATE GOOGLE OAUTH CREDENTIALS</div>'
               + '<div style="font-size:13px;line-height:1.7">'
@@ -55,52 +57,64 @@
               + '<div id="wiz-uri" style="background:#08090a;padding:10px;border-radius:6px;margin-top:6px;font-family:monospace;font-size:12px;color:#7c7fff;cursor:pointer;border:1px solid rgba(255,255,255,0.06)">' + redirectUri + ' <span style="opacity:0.4;margin-left:8px">click to copy</span></div>'
               + '</div>'
 
-              // Step 2: Paste credentials
+              // Step 2: Two options
               + '<div style="margin-bottom:16px;padding:14px;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.06);border-radius:8px">'
-              + '<div style="color:#34d399;font-weight:700;font-size:12px;margin-bottom:8px">2. PASTE YOUR CREDENTIALS</div>'
-              + '<label style="font-size:12px;color:#8a8f98;font-weight:600">Google Client ID</label>'
+              + '<div style="color:#34d399;font-weight:700;font-size:12px;margin-bottom:10px">2. STORE YOUR CREDENTIALS</div>'
+              + '<div style="font-size:12px;color:#8a8f98;margin-bottom:12px">Choose how to store your Google OAuth credentials:</div>'
+
+              // Option A: Quick setup (in-app)
+              + '<div style="margin-bottom:12px;padding:12px;background:rgba(52,211,153,0.05);border:1px solid rgba(52,211,153,0.12);border-radius:8px">'
+              + '<div style="display:flex;align-items:center;gap:6px;margin-bottom:8px"><span style="color:#34d399;font-weight:700;font-size:12px">OPTION A: Quick Setup</span><span style="font-size:10px;padding:2px 6px;background:rgba(251,191,36,0.1);color:#fbbf24;border-radius:4px;font-weight:600">Stored in database</span></div>'
+              + '<label style="font-size:11px;color:#8a8f98;font-weight:600">Client ID</label>'
               + '<input type="text" id="wiz-client-id" placeholder="xxxxxxxxxx.apps.googleusercontent.com" style="' + inputStyle + '" />'
-              + '<label style="font-size:12px;color:#8a8f98;font-weight:600;margin-top:12px;display:block">Google Client Secret</label>'
+              + '<label style="font-size:11px;color:#8a8f98;font-weight:600;margin-top:8px;display:block">Client Secret</label>'
               + '<input type="password" id="wiz-client-secret" placeholder="GOCSPX-xxxxxxxxxx" style="' + inputStyle + '" />'
-              + '<div id="wiz-save-status" style="margin-top:10px;font-size:12px"></div>'
-              + '<button id="wiz-save-btn" style="width:100%;margin-top:12px;padding:10px;background:linear-gradient(135deg,#34d399,#10b981);color:#fff;border:none;border-radius:8px;font-weight:700;font-size:13px;cursor:pointer">Save Credentials</button>'
+              + '<div id="wiz-save-status" style="margin-top:8px;font-size:11px"></div>'
+              + '<button id="wiz-save-btn" style="width:100%;margin-top:10px;padding:9px;background:linear-gradient(135deg,#34d399,#10b981);color:#fff;border:none;border-radius:6px;font-weight:700;font-size:12px;cursor:pointer">Save Credentials</button>'
               + '</div>'
 
-              // Step 3: Connect
-              + '<div style="padding:14px;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.06);border-radius:8px;margin-bottom:16px">'
-              + '<div style="color:#a78bfa;font-weight:700;font-size:12px;margin-bottom:8px">3. AUTHORIZE YOUR GMAIL</div>'
-              + '<div style="font-size:13px;color:#8a8f98;margin-bottom:12px">After saving credentials above, click to authorize:</div>'
-              + '<a href="/api/gmail/connect" target="_blank" id="wiz-auth-btn" style="display:block;text-align:center;padding:12px;background:linear-gradient(135deg,#5e6ad2,#7c6ae0);color:#fff;border-radius:8px;font-weight:700;font-size:14px;text-decoration:none">Authorize Gmail Now</a>'
+              // Option B: Secure (admin CLI)
+              + '<div style="padding:12px;background:rgba(96,165,250,0.05);border:1px solid rgba(96,165,250,0.12);border-radius:8px">'
+              + '<div style="display:flex;align-items:center;gap:6px;margin-bottom:8px"><span style="color:#60a5fa;font-weight:700;font-size:12px">OPTION B: Secure Setup</span><span style="font-size:10px;padding:2px 6px;background:rgba(52,211,153,0.1);color:#34d399;border-radius:4px;font-weight:600">Encrypted secrets</span></div>'
+              + '<div style="font-size:12px;color:#8a8f98;margin-bottom:6px">Ask your admin to run in terminal (credentials are encrypted, never stored in DB):</div>'
+              + '<div style="background:#08090a;padding:8px 10px;border-radius:6px;font-family:monospace;font-size:11px;color:#f7f8f8;line-height:1.9;border:1px solid rgba(255,255,255,0.06)">npx wrangler secret put GOOGLE_CLIENT_ID<br>npx wrangler secret put GOOGLE_CLIENT_SECRET</div>'
+              + '</div>'
               + '</div>'
 
-              + '<div style="text-align:center;font-size:11px;color:#5a5e66">Credentials are stored securely in the database. After authorizing, refresh the page.</div>'
+              // Step 3: Authorize
+              + '<a href="/api/gmail/connect" target="_blank" style="display:block;text-align:center;padding:14px;background:linear-gradient(135deg,#5e6ad2,#7c6ae0);color:#fff;border-radius:10px;font-weight:700;font-size:14px;text-decoration:none">3. Authorize Gmail Now</a>'
+              + '<div style="text-align:center;font-size:11px;color:#5a5e66;margin-top:10px">After authorizing, close this and refresh the page.</div>'
               + '</div>';
             document.body.appendChild(ov);
             document.getElementById('wiz-close').onclick = function() { ov.remove(); };
             document.getElementById('wiz-uri').onclick = function() { navigator.clipboard.writeText(redirectUri); this.style.borderColor='#34d399'; var sp=this.querySelector('span'); if(sp)sp.textContent='Copied!'; };
             ov.onclick = function(e) { if (e.target === ov) ov.remove(); };
 
-            // Check if creds are already saved
+            // Check if already configured
             fetch('/api/settings/status').then(function(r){return r.json()}).then(function(d) {
+              var checkEl = document.getElementById('wiz-check');
               if (d.google_client_id && d.google_client_secret) {
-                document.getElementById('wiz-save-status').innerHTML = '<span style="color:#34d399">\u2713 Credentials already saved. You can authorize below or update them.</span>';
+                checkEl.innerHTML = '<div style="color:#34d399;font-size:13px;font-weight:600">\u2713 Credentials configured. Click "Authorize Gmail Now" below.</div>';
+              } else {
+                checkEl.innerHTML = '<div style="color:#fbbf24;font-size:13px;font-weight:600">\u26A0 Credentials not yet configured. Follow the steps below.</div>';
               }
-            }).catch(function(){});
+            }).catch(function(){ document.getElementById('wiz-check').innerHTML = ''; });
 
-            // Save button
+            // Save button (Option A)
             document.getElementById('wiz-save-btn').addEventListener('click', function() {
               var cid = document.getElementById('wiz-client-id').value.trim();
               var csec = document.getElementById('wiz-client-secret').value.trim();
               var statusEl = document.getElementById('wiz-save-status');
-              if (!cid || !csec) { statusEl.innerHTML = '<span style="color:#f87171">Enter both Client ID and Client Secret</span>'; return; }
+              if (!cid || !csec) { statusEl.innerHTML = '<span style="color:#f87171">Enter both fields</span>'; return; }
               var btn = document.getElementById('wiz-save-btn');
               btn.textContent = 'Saving...'; btn.disabled = true;
               Promise.all([
                 fetch('/api/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({key:'google_client_id',value:cid})}),
                 fetch('/api/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({key:'google_client_secret',value:csec})}),
               ]).then(function() {
-                statusEl.innerHTML = '<span style="color:#34d399">\u2713 Credentials saved! Now click "Authorize Gmail Now" below.</span>';
+                statusEl.innerHTML = '<span style="color:#34d399">\u2713 Saved! Now click "Authorize Gmail Now" below.</span>';
                 btn.textContent = '\u2713 Saved'; btn.style.background = '#1e1f21'; btn.style.color = '#34d399';
+                document.getElementById('wiz-check').innerHTML = '<div style="color:#34d399;font-size:13px;font-weight:600">\u2713 Credentials configured. Click "Authorize Gmail Now" below.</div>';
               }).catch(function(e) {
                 statusEl.innerHTML = '<span style="color:#f87171">Failed: ' + e.message + '</span>';
                 btn.textContent = 'Save Credentials'; btn.disabled = false;

@@ -18,7 +18,14 @@ type Bindings = {
 };
 
 const app = new Hono<{ Bindings: Bindings; Variables: { userEmail: string } }>();
-app.use('/api/*', cors());
+app.use('/api/*', cors({
+  origin: (origin) => {
+    // Allow same-origin, workers.dev, and local dev
+    if (!origin) return '*'; // same-origin requests
+    if (origin.endsWith('.workers.dev') || origin.includes('localhost') || origin.includes('127.0.0.1')) return origin;
+    return origin; // Allow the requesting origin (Access handles auth)
+  },
+}));
 
 // ── Auth middleware: extract user email from Cloudflare Access JWT ──
 // Skip auth for public share endpoints
@@ -33,7 +40,6 @@ app.use('/api/*', async (c, next) => {
   const jwt = c.req.header('Cf-Access-Jwt-Assertion');
   if (jwt) {
     try {
-      // JWT is base64url encoded: header.payload.signature
       const payload = jwt.split('.')[1];
       const decoded = JSON.parse(atob(payload.replace(/-/g, '+').replace(/_/g, '/')));
       email = decoded.email || '';
@@ -45,9 +51,18 @@ app.use('/api/*', async (c, next) => {
     email = c.req.header('Cf-Access-Authenticated-User-Email') || '';
   }
 
-  // 3. Fallback for local dev / no Access configured: use a query param or default
+  // 3. Local dev only: allow _user query param when no Access headers present
   if (!email) {
-    email = c.req.query('_user') || 'default@revflare.local';
+    // Only allow in local dev (no CF headers = likely wrangler dev)
+    const isCFRequest = c.req.header('Cf-Connecting-Ip') || c.req.header('Cf-Ray');
+    if (!isCFRequest) {
+      email = c.req.query('_user') || 'default@revflare.local';
+    }
+  }
+
+  // Reject if still no email in production
+  if (!email) {
+    return c.json({ error: 'Authentication required. Please configure Cloudflare Access.' }, 401);
   }
 
   email = email.toLowerCase().trim();
@@ -227,8 +242,8 @@ app.get('/api/accounts', async (c) => {
   const status = c.req.query('status') || '';
   const sort = c.req.query('sort') || 'total_it_spend';
   const order = c.req.query('order') || 'DESC';
-  const page = parseInt(c.req.query('page') || '1');
-  const limit = parseInt(c.req.query('limit') || '50');
+  const page = Math.max(parseInt(c.req.query('page') || '1') || 1, 1);
+  const limit = Math.min(Math.max(parseInt(c.req.query('limit') || '50') || 50, 1), 200);
   const offset = (page - 1) * limit;
 
   let where = 'WHERE user_email = ?';
@@ -499,10 +514,27 @@ function getCompetitorMapping(account: any): { category: string; competitor: str
 // LIVE RESEARCH ENGINE — Real data, not AI inference
 // ══════════════════════════════════════════════════════════════════
 
+// ── SSRF Prevention: validate domains before external fetch ────────
+function isValidExternalDomain(domain: string): boolean {
+  if (!domain) return false;
+  const clean = domain.replace(/^https?:\/\//, '').replace(/\/.*/, '').replace(/:.*/, '').toLowerCase().trim();
+  // Block IP addresses (IPv4)
+  if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(clean)) return false;
+  // Block localhost, private ranges, link-local, loopback
+  if (/^(localhost|127\.|0\.|10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|169\.254\.|::1|fc|fd|\[::)/i.test(clean)) return false;
+  // Block internal/reserved domains
+  if (/\.(local|internal|svc|cluster|corp|lan|home|arpa)$/i.test(clean)) return false;
+  // Require at least one dot (valid domain)
+  if (!clean.includes('.')) return false;
+  // Block empty or overly long domains
+  if (clean.length < 3 || clean.length > 253) return false;
+  return true;
+}
+
 // ── 1. Website Scraper (with Browser Rendering fallback) ───────────
 async function scrapeWebsite(domain: string, browser?: Fetcher): Promise<{ aboutText: string; metaDescription: string; title: string; careers: string; techSignals: string[]; investorRelations: string; pressReleases: string }> {
   const result = { aboutText: '', metaDescription: '', title: '', careers: '', techSignals: [] as string[], investorRelations: '', pressReleases: '' };
-  if (!domain) return result;
+  if (!domain || !isValidExternalDomain(domain)) return result;
 
   const clean = domain.replace(/^https?:\/\//, '').replace(/\/.*/, '');
   const urls = [
@@ -610,7 +642,7 @@ async function scrapeWebsite(domain: string, browser?: Fetcher): Promise<{ about
 // ── 2. DNS / SSL / HTTP Header Probe ───────────────────────────────
 async function probeDomain(domain: string): Promise<{ headers: Record<string, string>; serverInfo: string; cdnDetected: string; securityHeaders: string[]; tlsInfo: string }> {
   const result = { headers: {} as Record<string, string>, serverInfo: '', cdnDetected: '', securityHeaders: [] as string[], tlsInfo: '' };
-  if (!domain) return result;
+  if (!domain || !isValidExternalDomain(domain)) return result;
 
   const clean = domain.replace(/^https?:\/\//, '').replace(/\/.*/, '');
   try {
@@ -660,7 +692,7 @@ async function probeDomain(domain: string): Promise<{ headers: Record<string, st
 // ── 3. DNS Record Lookup via Cloudflare DoH ────────────────────────
 async function lookupDNS(domain: string): Promise<{ aRecords: string[]; cnameRecords: string[]; mxRecords: string[]; nsRecords: string[]; dnsProvider: string }> {
   const result = { aRecords: [] as string[], cnameRecords: [] as string[], mxRecords: [] as string[], nsRecords: [] as string[], dnsProvider: '' };
-  if (!domain) return result;
+  if (!domain || !isValidExternalDomain(domain)) return result;
   const clean = domain.replace(/^https?:\/\//, '').replace(/\/.*/, '');
 
   const types = ['A', 'CNAME', 'MX', 'NS'];
@@ -1953,12 +1985,14 @@ app.post('/api/share/:accountId', async (c) => {
   ).bind(accountId, email).first();
   if (!account) return c.json({ error: 'Account not found' }, 404);
 
-  // Generate token
-  const token = crypto.randomUUID().replace(/-/g, '').slice(0, 16);
+  // Generate cryptographically strong token (full UUID = 128-bit entropy)
+  const token = crypto.randomUUID().replace(/-/g, '');
+  // Default 30-day expiry
+  const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
 
   await c.env.DB.prepare(
-    'INSERT INTO share_tokens (token, account_id, created_by, label) VALUES (?, ?, ?, ?)'
-  ).bind(token, accountId, email, label || account.account_name).run();
+    'INSERT INTO share_tokens (token, account_id, created_by, label, expires_at) VALUES (?, ?, ?, ?, ?)'
+  ).bind(token, accountId, email, label || account.account_name, expiresAt).run();
 
   const shareUrl = new URL(`/share/${token}`, c.req.url).toString();
   return c.json({ token, url: shareUrl, label: label || account.account_name });
@@ -2308,6 +2342,10 @@ app.post('/api/gmail/send-campaign/:campaignId', async (c) => {
   const campaignId = c.req.param('campaignId');
   const email = c.get('userEmail');
   const { emailIds, toField } = await c.req.json<{ emailIds: number[]; toField: string }>();
+
+  // Verify campaign ownership
+  const campaign = await c.env.DB.prepare('SELECT id FROM campaigns WHERE id = ? AND user_email = ?').bind(campaignId, email).first();
+  if (!campaign) return c.json({ error: 'Campaign not found or access denied' }, 403);
 
   const { clientId: gci2, clientSecret: gcs2 } = await getGoogleCreds(c.env.DB, c.env);
   if (!gci2 || !gcs2) return c.json({ error: 'Gmail not configured' }, 500);
@@ -2844,8 +2882,8 @@ app.post('/api/meeting-prep/:accountId', async (c) => {
   if (!account) return c.json({ error: 'Account not found' }, 404);
 
   const ctx = buildAccountContext(account);
-  const research = await c.env.DB.prepare('SELECT content FROM research_reports WHERE account_id = ? ORDER BY created_at DESC LIMIT 1').bind(account.id).first();
-  const messages = await c.env.DB.prepare('SELECT content FROM persona_messages WHERE account_id = ? ORDER BY created_at DESC LIMIT 1').bind(account.id).first();
+  const research = await c.env.DB.prepare('SELECT content FROM research_reports WHERE account_id = ? AND user_email = ? ORDER BY created_at DESC LIMIT 1').bind(account.id, c.get('userEmail')).first();
+  const messages = await c.env.DB.prepare('SELECT content FROM persona_messages WHERE account_id = ? AND user_email = ? ORDER BY created_at DESC LIMIT 1').bind(account.id, c.get('userEmail')).first();
 
   const prompt = buildMeetingPrepPrompt(account, ctx, (research as any)?.content || '', (messages as any)?.content || '');
   const content = await runAI(c.env.AI, EMAIL_MODEL, 'You are preparing a sales rep for an important customer call. Be concise, specific, and actionable.', prompt);
@@ -2950,7 +2988,7 @@ app.post('/api/win-loss/:opportunityId', async (c) => {
   let account: any = {};
   let ctx = '';
   if (opp.account_id) {
-    account = await c.env.DB.prepare('SELECT * FROM accounts WHERE id = ?').bind(opp.account_id).first() || {};
+    account = await c.env.DB.prepare('SELECT * FROM accounts WHERE id = ? AND user_email = ?').bind(opp.account_id, c.get('userEmail')).first() || {};
     ctx = buildAccountContext(account);
   }
 
@@ -3108,7 +3146,9 @@ app.post('/api/salesforce/push-activity', async (c) => {
   if (!sf) return c.json({ error: 'Salesforce not connected' }, 401);
 
   // Search for the account in SF
-  const searchRes = await fetch(`${sf.instance_url}/services/data/v59.0/query?q=${encodeURIComponent(`SELECT Id FROM Account WHERE Name = '${accountName.replace(/'/g, "\\'")}'`)}`, {
+  // Escape SOQL special characters to prevent injection
+  const safeName = accountName.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/%/g, '\\%').replace(/_/g, '\\_');
+  const searchRes = await fetch(`${sf.instance_url}/services/data/v59.0/query?q=${encodeURIComponent(`SELECT Id FROM Account WHERE Name = '${safeName}'`)}`, {
     headers: { 'Authorization': `Bearer ${sf.access_token}` },
   });
   const searchData = await searchRes.json() as any;
@@ -3134,7 +3174,8 @@ app.get('/api/salesforce/opportunities/:accountName', async (c) => {
   const sf = await c.env.DB.prepare('SELECT * FROM salesforce_tokens WHERE user_email = ?').bind(c.get('userEmail')).first() as any;
   if (!sf) return c.json({ error: 'Salesforce not connected' }, 401);
   const name = c.req.param('accountName');
-  const res = await fetch(`${sf.instance_url}/services/data/v59.0/query?q=${encodeURIComponent(`SELECT Id,Name,Amount,StageName,CloseDate,Type FROM Opportunity WHERE Account.Name = '${name.replace(/'/g, "\\'")}'`)}`, {
+  const safeOppName = name.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/%/g, '\\%').replace(/_/g, '\\_');
+  const res = await fetch(`${sf.instance_url}/services/data/v59.0/query?q=${encodeURIComponent(`SELECT Id,Name,Amount,StageName,CloseDate,Type FROM Opportunity WHERE Account.Name = '${safeOppName}'`)}`, {
     headers: { 'Authorization': `Bearer ${sf.access_token}` },
   });
   if (!res.ok) return c.json({ error: 'SF query failed' }, 500);
@@ -3282,7 +3323,7 @@ app.post('/api/opportunities/auto-generate', async (c) => {
     })
     .filter(c => c.leadScore >= 30) // minimum threshold
     .sort((a, b) => b.leadScore - a.leadScore)
-    .slice(0, Math.min(maxOpps || 10, 20));
+    .slice(0, Math.min(maxOpps || 5, 10));
 
   if (!candidates.length) {
     return c.json({ created: [], message: 'No new opportunities found. All high-scoring accounts already have opportunities, or no accounts meet the threshold.' });
@@ -3309,32 +3350,63 @@ Think step by step. Be specific with numbers and reasoning.`;
 
   try {
     // Stage 1: Deep reasoning with DeepSeek R1
-    const deepAnalysis = await runAI(c.env.AI, RESEARCH_MODEL, reasoningSystem, reasoningPrompt);
-
-    // ── Stage 2: Llama 3.3 70B — structured JSON from analysis ──
-    const structuredSystem = `You are a data formatter. Given a sales analysis of accounts, extract the key decisions into a clean JSON array.
-Return ONLY a valid JSON array like: [{"index":0,"stage":"prospecting","acv":50000,"notes":"..."},...]
-- "index": the account index number [0], [1], etc from the original list
-- "stage": exactly one of "prospecting", "qualification", "proposal", "negotiation"
-- "acv": annual contract value in dollars (integer, no decimals)
-- "notes": 1-2 sentence actionable sales insight
-No markdown fences, no explanation text, ONLY the JSON array.`;
-
-    const structuredPrompt = `Original accounts:\n${accountSummaries}\n\n---\nDeepSeek R1 Analysis:\n${deepAnalysis}\n\n---\nConvert the analysis above into the JSON array format. One entry per account.`;
-
-    const aiResult = await runAI(c.env.AI, EMAIL_MODEL, structuredSystem, structuredPrompt);
-
-    // Parse AI response — extract JSON array
-    const jsonMatch = aiResult.match(/\[[\s\S]*\]/);
-    if (!jsonMatch) {
-      return c.json({ error: 'AI did not return valid JSON. Raw: ' + aiResult.slice(0, 500) }, 500);
+    let deepAnalysis = '';
+    try {
+      const raw1 = await runAI(c.env.AI, RESEARCH_MODEL, reasoningSystem, reasoningPrompt);
+      deepAnalysis = typeof raw1 === 'string' ? raw1 : JSON.stringify(raw1);
+    } catch (e: any) {
+      // If DeepSeek fails, fall through with empty analysis — Stage 2 can still work from account data alone
+      console.log('Stage 1 (DeepSeek) failed: ' + e.message + '. Proceeding with Stage 2 only.');
     }
 
+    // ── Stage 2: Llama 3.3 70B — structured JSON from analysis ──
+    const structuredSystem = `You are a data formatter. Output ONLY a JSON array. No markdown, no explanation.
+Format: [{"index":0,"stage":"prospecting","acv":50000,"notes":"short insight"},...]
+Rules:
+- "index": account index [0],[1],etc
+- "stage": one of prospecting/qualification/proposal/negotiation
+- "acv": integer dollars (2-8% of IT spend)
+- "notes": MAX 15 words, actionable
+Keep output compact. ONLY the JSON array.`;
+
+    const structuredPrompt = deepAnalysis
+      ? `Original accounts:\n${accountSummaries}\n\n---\nDeepSeek R1 Analysis:\n${deepAnalysis}\n\n---\nConvert the analysis above into the JSON array format. One entry per account.`
+      : `Analyze these accounts and generate opportunity JSON:\n\n${accountSummaries}\n\n---\nReturn the JSON array. One entry per account.`;
+
+    const raw2 = await runAI(c.env.AI, EMAIL_MODEL, structuredSystem, structuredPrompt);
+    const aiResult = typeof raw2 === 'string' ? raw2 : JSON.stringify(raw2);
+
+    // Parse AI response — extract JSON array, with partial recovery
     let aiOpps: any[];
-    try {
-      aiOpps = JSON.parse(jsonMatch[0]);
-    } catch {
-      return c.json({ error: 'Failed to parse AI JSON: ' + jsonMatch[0].slice(0, 500) }, 500);
+    const jsonMatch = aiResult.match(/\[[\s\S]*\]/);
+    if (jsonMatch) {
+      try {
+        aiOpps = JSON.parse(jsonMatch[0]);
+      } catch {
+        // Truncated JSON — recover complete objects
+        const objMatches = aiResult.match(/\{[^{}]*\}/g);
+        if (!objMatches || !objMatches.length) {
+          return c.json({ error: 'AI returned unparseable JSON. Raw: ' + (aiResult || '').slice(0, 300) }, 500);
+        }
+        aiOpps = [];
+        for (const m of objMatches) {
+          try { aiOpps.push(JSON.parse(m)); } catch {}
+        }
+      }
+    } else {
+      // No array brackets at all — try extracting individual objects
+      const objMatches = aiResult.match(/\{[^{}]*\}/g);
+      if (!objMatches || !objMatches.length) {
+        return c.json({ error: 'AI did not return JSON. Raw: ' + (aiResult || '').slice(0, 300) }, 500);
+      }
+      aiOpps = [];
+      for (const m of objMatches) {
+        try { aiOpps.push(JSON.parse(m)); } catch {}
+      }
+    }
+
+    if (!aiOpps.length) {
+      return c.json({ error: 'Could not extract any valid opportunities from AI response.' }, 500);
     }
 
     // Create opportunities in DB

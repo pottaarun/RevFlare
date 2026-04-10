@@ -64,13 +64,17 @@ function statusPill(s){if(!s)return'<span class="pill pill-neutral">Unknown</spa
 function timeAgo(d){if(!d)return'--';const t=new Date(d);if(isNaN(t))return d;const days=Math.floor((Date.now()-t)/864e5);if(!days)return'Today';if(days===1)return'Yesterday';if(days<30)return days+'d ago';if(days<365)return Math.floor(days/30)+'mo ago';return Math.floor(days/365)+'y ago';}
 function truncate(s,n){return s&&s.length>n?s.slice(0,n)+'\u2026':s||'';}
 function toast(m,t=''){let e=$('#toast');if(!e){e=document.createElement('div');e.id='toast';e.className='toast';document.body.appendChild(e);}e.textContent=m;e.className=`toast ${t?'toast-'+t:''} show`;clearTimeout(e._t);e._t=setTimeout(()=>e.classList.remove('show'),3500);}
-function md(s){if(!s)return'';return s
+// HTML escape to prevent XSS
+function esc(s){if(!s)return'';return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
+function md(s){if(!s)return'';
+  s=esc(s); // Escape HTML entities FIRST, then apply markdown
+  return s
   .replace(/\[([^\]]+)\]\((https?:\/\/[^\)]+)\)/g,'<a href="$2" target="_blank" rel="noopener" style="color:var(--accent-bright);text-decoration:underline;text-underline-offset:2px">$1</a>')
   .replace(/^#### (.+)$/gm,'<h4>$1</h4>').replace(/^### (.+)$/gm,'<h3>$1</h3>').replace(/^## (.+)$/gm,'<h2>$1</h2>').replace(/^# (.+)$/gm,'<h1>$1</h1>')
   .replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>').replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g,'<em>$1</em>')
   .replace(/`(.+?)`/g,'<code>$1</code>')
   .replace(/^- (.+)$/gm,'<li>$1</li>').replace(/^(\d+)\. (.+)$/gm,'<li>$2</li>').replace(/((?:<li>.*<\/li>\n?)+)/g,'<ul>$1</ul>')
-  .replace(/^> (.+)$/gm,'<blockquote>$1</blockquote>')
+  .replace(/^&gt; (.+)$/gm,'<blockquote>$1</blockquote>')
   .replace(/---/g,'<hr>').replace(/\n\n/g,'</p><p>').replace(/^(?!<[huloba])(.+)$/gm,'<p>$1</p>').replace(/<p><\/p>/g,'');}
 
 // ── Router ─────────────────────────────────────────────────────────

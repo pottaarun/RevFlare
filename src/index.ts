@@ -70,11 +70,15 @@ app.use('/api/*', async (c, next) => {
   await next();
 });
 
-// ── Get current user endpoint ──────────────────────────────────────
+// ── Admin ──────────────────────────────────────────────────────────
+const ADMIN_EMAILS = new Set(['apotta@cloudflare.com']);
+function isAdmin(email: string): boolean { return ADMIN_EMAILS.has(email.toLowerCase().trim()); }
+
 app.get('/api/me', async (c) => {
+  // Override: include admin flag
   const email = c.get('userEmail');
   const count = await c.env.DB.prepare('SELECT COUNT(*) as cnt FROM accounts WHERE user_email = ?').bind(email).first();
-  return c.json({ email, accountCount: (count as any)?.cnt || 0 });
+  return c.json({ email, accountCount: (count as any)?.cnt || 0, isAdmin: isAdmin(email) });
 });
 
 // ── Page View Analytics ────────────────────────────────────────────
@@ -93,6 +97,7 @@ app.post('/api/track', async (c) => {
 
 app.get('/api/analytics', async (c) => {
   const email = c.get('userEmail');
+  if (!isAdmin(email)) return c.json({ error: 'Admin access required' }, 403);
   const days = Math.min(parseInt(c.req.query('days') || '30') || 30, 90);
   const since = new Date(Date.now() - days * 86400000).toISOString();
 

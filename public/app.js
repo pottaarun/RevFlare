@@ -2872,6 +2872,7 @@ function renderAnalytics(c) {
   c.innerHTML = '<div class="loading-state"><div class="spinner"></div>Loading analytics...</div>';
 
   api.get('/analytics?days=30').then(function(data) {
+    if (data.error) { c.innerHTML = '<div class="empty-state"><div class="empty-icon">' + IC.shield + '</div><h2 class="page-title" style="font-size:22px">Admin Access Required</h2><p class="page-subtitle">The analytics dashboard is restricted to administrators.</p></div>'; return; }
     var h = '<div class="fade-in">';
     h += '<div class="page-header"><h1 class="page-title">Usage Analytics</h1>';
     h += '<p class="page-subtitle">Page and tab visit tracking across all users (last ' + data.days + ' days).</p></div>';

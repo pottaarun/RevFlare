@@ -37,8 +37,8 @@
           <a href="#/team" class="nav-link" data-route="team">Team</a>
           <a href="#/playbooks" class="nav-link" data-route="playbooks">Playbooks</a>
           <a href="#/upload" class="nav-link" data-route="upload">Upload</a>
-          <span class="nav-sep"></span>
-          <a href="#/analytics" class="nav-link" data-route="analytics">Analytics</a>
+          <span class="nav-sep" id="analytics-sep" style="display:none"></span>
+          <a href="#/analytics" class="nav-link" data-route="analytics" id="analytics-link" style="display:none">Analytics</a>
         </div>
         <div class="nav-right">
           <div style="position:relative">
@@ -136,6 +136,15 @@
             var unread = (alerts || []).filter(function(a){return !a.read}).length;
             var badge = document.getElementById('alert-badge');
             if (badge && unread > 0) { badge.textContent = unread; badge.style.display = 'inline-flex'; }
+          }).catch(function(){});
+          // Show analytics link for admins only
+          fetch('/api/me').then(function(r){return r.json()}).then(function(me) {
+            if (me && me.isAdmin) {
+              var link = document.getElementById('analytics-link');
+              var sep = document.getElementById('analytics-sep');
+              if (link) link.style.display = '';
+              if (sep) sep.style.display = '';
+            }
           }).catch(function(){});
           </script>
           <span class="nav-stat" id="nav-stat" style="display:none"></span>

@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import puppeteer from '@cloudflare/puppeteer';
+import { fetchThreatIntelligence, matchIncidentsToAccount, buildIncidentBDREmail, inferCloudflareProducts, type ThreatIncident } from './threat-intel';
 
 // ── Types ──────────────────────────────────────────────────────────
 type Bindings = {
@@ -2674,6 +2675,82 @@ app.get('/api/campaigns/:id/export', async (c) => {
   }
 
   return new Response(csv, { headers: { 'Content-Type': 'text/csv', 'Content-Disposition': `attachment; filename="campaign-${campaignId}.csv"` } });
+});
+
+// ══════════════════════════════════════════════════════════════════
+// THREAT INTELLIGENCE
+// ══════════════════════════════════════════════════════════════════
+
+// Global threat feed (all incidents, not account-specific)
+app.get('/api/threats', async (c) => {
+  const days = parseInt(c.req.query('days') || '14');
+  const result = await fetchThreatIntelligence(days);
+  return c.json(result);
+});
+
+// Threats relevant to a specific account
+app.get('/api/threats/:accountId', async (c) => {
+  const accountId = c.req.param('accountId');
+  const account = await c.env.DB.prepare('SELECT * FROM accounts WHERE id = ? AND user_email = ?')
+    .bind(accountId, c.get('userEmail')).first();
+  if (!account) return c.json({ error: 'Account not found' }, 404);
+
+  const result = await fetchThreatIntelligence(14);
+  const matched = matchIncidentsToAccount(result.incidents, account);
+
+  return c.json({
+    incidents: matched,
+    totalScanned: result.totalFetched,
+    accountName: account.account_name,
+    industry: account.industry,
+  });
+});
+
+// Generate incident-triggered BDR email for an account
+app.post('/api/threats/:accountId/email', async (c) => {
+  const accountId = c.req.param('accountId');
+  const { incidentIndex, persona } = await c.req.json<{ incidentIndex?: number; persona?: string }>();
+
+  const account = await c.env.DB.prepare('SELECT * FROM accounts WHERE id = ? AND user_email = ?')
+    .bind(accountId, c.get('userEmail')).first();
+  if (!account) return c.json({ error: 'Account not found' }, 404);
+
+  const result = await fetchThreatIntelligence(14);
+  const matched = matchIncidentsToAccount(result.incidents, account);
+
+  if (!matched.length) return c.json({ error: 'No relevant incidents found for this account' }, 404);
+
+  const incident = matched[incidentIndex || 0];
+  const ctx = buildAccountContext(account);
+  const personaConfig = PERSONA_CONFIGS[persona || 'bdr'];
+
+  const system = `You are a ${personaConfig?.title || 'BDR'} at Cloudflare writing an INCIDENT-TRIGGERED outreach email.
+A real cybersecurity incident has just been reported that is directly relevant to this prospect's industry.
+Your job is to reference the specific incident, connect it to the prospect's situation, and position Cloudflare as the solution.
+TONE: ${personaConfig?.tone || 'Urgent but professional. Not fear-mongering — consultative.'}
+Write a ready-to-send email. Start with Subject: line.`;
+
+  const prompt = `Generate an incident-triggered email for ${account.account_name}:
+
+INCIDENT:
+Title: ${incident.title}
+Summary: ${incident.summary}
+Source: ${incident.source} (${incident.publishedAt})
+Attack Score: ${incident.score}
+Cloudflare Products That Address This: ${incident.cfProducts.join(', ')}
+
+ACCOUNT:
+${ctx}
+
+STRUCTURE:
+1. Open by referencing the specific incident — make it clear this is timely and real
+2. Connect to the prospect's industry and situation
+3. Position specific Cloudflare products that would have prevented this
+4. Quantify the risk — reference their current security vendor (${account.security_primary || 'unknown'}) and whether it covers this attack vector
+5. Clear CTA — offer a security assessment or incident briefing`;
+
+  const content = await runAI(c.env.AI, EMAIL_MODEL, system, prompt);
+  return c.json({ content, incident: { title: incident.title, score: incident.score, cfProducts: incident.cfProducts } });
 });
 
 // ── Catalog endpoint: return full CF product catalog for browsing ───

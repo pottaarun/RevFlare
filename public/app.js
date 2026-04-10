@@ -78,6 +78,7 @@ function navigate(){
   const h=location.hash||'#/';const m=$('#main');
   $$('.nav-link').forEach(l=>l.classList.toggle('active',l.getAttribute('href')===h||(h.startsWith('#/account')&&l.dataset.route==='dashboard')));
   if(h==='#/upload')renderUpload(m);
+  else if(h==='#/threats')renderGlobalThreats(m);
   else if(h==='#/campaigns')renderCampaigns(m);
   else if(h.startsWith('#/campaign/'))renderCampaignDetail(m,h.split('/')[2]);
   else if(h.startsWith('#/share/'))renderShareView(m,h.split('/')[2]);
@@ -357,6 +358,7 @@ async function renderAccount(c,id){
       <div class="tabs" id="tabs">
         <button class="tab active" data-t="overview">Overview</button>
         <button class="tab" data-t="research">Deep Research</button>
+        <button class="tab" data-t="threats">Threat Intel</button>
         <button class="tab" data-t="competitive">Competitive Intel</button>
         <button class="tab" data-t="messaging">Email Composer</button>
         <button class="tab" data-t="history">History</button>
@@ -390,7 +392,7 @@ async function renderAccount(c,id){
   }catch(e){c.innerHTML=`<div class="empty-state"><p style="color:var(--red)">${e.message}</p><a href="#/" class="btn btn-ghost" style="margin-top:16px">Back</a></div>`;}
 }
 
-function renderTab(a){const c=$('#tc');switch(S.activeTab){case'overview':tabOverview(c,a);break;case'research':tabResearch(c,a);break;case'competitive':tabCompetitive(c,a);break;case'messaging':tabMessaging(c,a);break;case'history':tabHistory(c,a);break;}}
+function renderTab(a){const c=$('#tc');switch(S.activeTab){case'overview':tabOverview(c,a);break;case'research':tabResearch(c,a);break;case'threats':tabThreats(c,a);break;case'competitive':tabCompetitive(c,a);break;case'messaging':tabMessaging(c,a);break;case'history':tabHistory(c,a);break;}}
 
 // ── Overview Tab ───────────────────────────────────────────────────
 function tabOverview(c,a){
@@ -505,6 +507,142 @@ function showResearchResult(a, cache, type) {
     ro.innerHTML=`<div class="output-card"><div class="ai-loading"><div class="ai-pulse">${IC.sparkles}</div><div class="ai-loading-text">Regenerating research...</div><div class="ai-loading-sub">Running fresh live probes and analysis</div></div></div>`;
     delete cache.results[type];
     await runResearch(a, cache, type);
+  });
+}
+
+// ── Global Threat Intel Dashboard ──────────────────────────────────
+function renderGlobalThreats(c) {
+  c.innerHTML = '<div class="loading-state"><div class="spinner"></div>Scanning 26 RSS feeds, GDELT, Google News, Bing News...</div>';
+  api.get('/threats?days=14').then(function(data) {
+    var incidents = data.incidents || [];
+    var h = '<div class="fade-in">';
+    h += '<div class="page-header"><h1 class="page-title">Threat Intelligence</h1>';
+    h += '<p class="page-subtitle">Real-time cybersecurity incidents from ' + data.sourceCount + ' source categories. ' + data.totalFetched + ' articles scanned, ' + incidents.length + ' entity-compromise incidents found.</p></div>';
+
+    // Stats
+    var highSev = incidents.filter(function(i){return i.score > 80}).length;
+    var medSev = incidents.filter(function(i){return i.score > 50 && i.score <= 80}).length;
+    h += '<div class="stats-row" style="margin-bottom:28px">';
+    h += '<div class="stat-card sc-cdn"><div class="stat-label">Total Incidents</div><div class="stat-value" style="color:#f9a8d4">' + incidents.length + '</div><div class="stat-sub">Last 14 days</div></div>';
+    h += '<div class="stat-card sc-revenue"><div class="stat-label">Critical/High</div><div class="stat-value" style="color:#f87171">' + highSev + '</div><div class="stat-sub">Score 80+</div></div>';
+    h += '<div class="stat-card sc-avg"><div class="stat-label">Medium</div><div class="stat-value" style="color:#fcd34d">' + medSev + '</div><div class="stat-sub">Score 50-80</div></div>';
+    h += '<div class="stat-card sc-accounts"><div class="stat-label">Articles Scanned</div><div class="stat-value" style="color:#93bbfd">' + data.totalFetched + '</div><div class="stat-sub">Across all feeds</div></div>';
+    h += '</div>';
+
+    for (var i = 0; i < incidents.length; i++) {
+      var inc = incidents[i];
+      var sev = inc.score > 80 ? '#f87171' : inc.score > 50 ? '#fbbf24' : '#8a8f98';
+      var prods = (inc.cfProducts || []).slice(0, 5);
+      h += '<div class="d-card" style="margin-bottom:10px;border-color:' + sev + '15">';
+      h += '<div style="display:flex;align-items:flex-start;gap:12px">';
+      h += '<div style="font-size:18px;font-weight:800;color:' + sev + ';min-width:36px;text-align:center">' + inc.score + '</div>';
+      h += '<div style="flex:1"><div style="font-size:13px;font-weight:700;color:var(--text-primary)">' + inc.title + '</div>';
+      h += '<div style="font-size:11px;color:var(--text-muted);margin-top:2px">' + inc.source + ' &middot; ' + (inc.publishedAt ? new Date(inc.publishedAt).toLocaleDateString() : '') + '</div>';
+      if (prods.length) { h += '<div style="display:flex;flex-wrap:wrap;gap:3px;margin-top:6px">'; for (var j=0;j<prods.length;j++) h += '<span class="stack-chip is-cf" style="font-size:10px;padding:2px 6px">' + prods[j] + '</span>'; h += '</div>'; }
+      h += '</div>';
+      h += '<a href="' + inc.url + '" target="_blank" class="btn btn-ghost btn-sm" style="flex-shrink:0">' + IC.globe + '</a>';
+      h += '</div></div>';
+    }
+    h += '</div>';
+    c.innerHTML = h;
+  }).catch(function(err) {
+    c.innerHTML = '<div style="padding:32px;color:var(--red)">' + err.message + '</div>';
+  });
+}
+
+// ── Threat Intel Tab ──────────────────────────────────────────────
+function tabThreats(c, a) {
+  c.innerHTML = '<div class="loading-state"><div class="spinner"></div>Scanning threat intelligence feeds...</div>';
+
+  api.get('/threats/' + a.id).then(function(data) {
+    var incidents = data.incidents || [];
+    var h = '<div class="fade-in">';
+    h += '<p style="font-size:14px;color:var(--text-muted);margin-bottom:20px">Real-time cybersecurity incidents relevant to <strong style="color:var(--text-primary)">' + a.account_name + '</strong> (' + (a.industry || 'all industries') + '). Aggregated from 26 RSS feeds, GDELT, Google News, and Bing News. ' + data.totalScanned + ' articles scanned.</p>';
+
+    if (!incidents.length) {
+      h += '<div style="text-align:center;padding:48px 0;color:var(--text-muted)"><div style="font-size:32px;margin-bottom:12px">' + IC.shield + '</div><p style="font-size:14px">No recent incidents matching ' + (a.industry || 'this account') + ' found in the last 14 days.</p><p style="font-size:12px;margin-top:8px">This is actually good news for the prospect. Try the global feed below.</p>';
+      h += '<button class="btn btn-ghost" id="load-global-threats" style="margin-top:16px">' + IC.alert + ' View All Global Threats</button></div>';
+    } else {
+      h += '<div class="persona-section-title" style="margin-bottom:12px">' + incidents.length + ' Relevant Incidents</div>';
+      for (var i = 0; i < incidents.length; i++) {
+        var inc = incidents[i];
+        var severity = inc.score > 80 ? 'var(--red)' : inc.score > 50 ? 'var(--amber)' : 'var(--text-muted)';
+        var prods = (inc.cfProducts || []).slice(0, 4);
+        h += '<div class="d-card" style="margin-bottom:12px;border-color:' + severity + '20">';
+        h += '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px">';
+        h += '<div style="flex:1"><div style="font-size:14px;font-weight:700;color:var(--text-primary);line-height:1.4">' + inc.title + '</div>';
+        h += '<div style="font-size:12px;color:var(--text-muted);margin-top:4px">' + inc.source + ' &middot; ' + (inc.publishedAt ? new Date(inc.publishedAt).toLocaleDateString() : '') + '</div>';
+        h += '<p style="font-size:13px;color:var(--text-secondary);margin-top:8px;line-height:1.6">' + (inc.summary || '').slice(0, 200) + '</p>';
+        if (prods.length) {
+          h += '<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:8px">';
+          for (var j = 0; j < prods.length; j++) h += '<span class="stack-chip is-cf">' + prods[j] + '</span>';
+          h += '</div>';
+        }
+        h += '</div>';
+        h += '<div style="text-align:center;flex-shrink:0"><div style="font-size:20px;font-weight:800;color:' + severity + '">' + inc.score + '</div><div style="font-size:9px;color:var(--text-muted);font-weight:600">SEVERITY</div></div>';
+        h += '</div>';
+        h += '<div style="display:flex;gap:8px;margin-top:12px;padding-top:10px;border-top:1px solid var(--border-glass)">';
+        h += '<button class="btn btn-primary btn-sm gen-threat-email" data-idx="' + i + '">' + IC.send + ' Generate Outreach Email</button>';
+        h += '<a href="' + inc.url + '" target="_blank" class="btn btn-ghost btn-sm">' + IC.globe + ' Read Article</a>';
+        h += '</div></div>';
+      }
+    }
+    h += '<div id="threat-email-output" style="margin-top:24px"></div>';
+    h += '</div>';
+    c.innerHTML = h;
+
+    // Generate email from incident
+    var emailBtns = c.querySelectorAll('.gen-threat-email');
+    for (var i = 0; i < emailBtns.length; i++) {
+      (function(btn) {
+        btn.addEventListener('click', function() {
+          var idx = parseInt(btn.getAttribute('data-idx'));
+          var out = document.getElementById('threat-email-output');
+          btn.disabled = true;
+          btn.innerHTML = '<div class="spinner" style="width:12px;height:12px;border-width:1.5px;display:inline-block;vertical-align:middle;margin-right:6px"></div> Generating...';
+          out.innerHTML = '<div style="padding:32px;text-align:center"><div class="spinner" style="margin:0 auto 12px"></div><div style="color:var(--text-muted);font-size:13px">Generating incident-triggered email for ' + a.account_name + '...</div></div>';
+          out.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+          api.post('/threats/' + a.id + '/email', { incidentIndex: idx, persona: 'bdr' }).then(function(r) {
+            var emailBody = (r.content || '').replace(/^Subject:.*\n*/im, '');
+            var subject = (r.content || '').match(/Subject:?\s*(.+?)(?:\n|$)/i);
+            subject = subject ? subject[1].trim() : 'Security Incident Alert';
+            out.innerHTML = '<div class="email-preview slide-up">'
+              + '<div class="email-toolbar"><div class="email-dot r"></div><div class="email-dot y"></div><div class="email-dot g"></div><span style="margin-left:auto;font-size:11px;color:var(--text-muted);font-weight:600">Incident-Triggered / BDR</span></div>'
+              + '<div class="email-subject-bar"><div style="display:flex;align-items:center;gap:8px;margin-bottom:8px"><span style="font-size:20px">' + IC.alert + '</span><div><div style="font-size:11px;color:var(--red);font-weight:600">Triggered by: ' + (r.incident?.title || '').slice(0, 60) + '</div><div style="font-size:10px;color:var(--text-muted)">Severity: ' + (r.incident?.score || 0) + ' | CF Products: ' + (r.incident?.cfProducts || []).join(', ') + '</div></div></div>'
+              + '<div class="email-subject-label">Subject</div><div class="email-subject">' + subject + '</div></div>'
+              + '<div class="email-body">' + md(emailBody) + '</div>'
+              + '<div class="email-actions"><button class="btn btn-primary btn-sm" onclick="copyEl(this,\'email\')">' + IC.copy + ' Copy Email</button></div>'
+              + '</div>';
+            btn.disabled = false;
+            btn.innerHTML = IC.send + ' Generate Outreach Email';
+          }).catch(function(err) {
+            out.innerHTML = '<div style="padding:24px;color:var(--red);text-align:center">' + err.message + '</div>';
+            btn.disabled = false;
+            btn.innerHTML = IC.send + ' Generate Outreach Email';
+          });
+        });
+      })(emailBtns[i]);
+    }
+
+    // Global threats fallback button
+    var globalBtn = document.getElementById('load-global-threats');
+    if (globalBtn) {
+      globalBtn.addEventListener('click', function() {
+        globalBtn.innerHTML = '<div class="spinner" style="width:12px;height:12px;border-width:1.5px;display:inline-block;vertical-align:middle;margin-right:6px"></div> Loading...';
+        api.get('/threats?days=14').then(function(r) {
+          var h2 = '<div class="persona-section-title" style="margin-top:20px">' + r.incidents.length + ' Global Incidents (all industries)</div>';
+          for (var i = 0; i < Math.min(r.incidents.length, 15); i++) {
+            var inc = r.incidents[i];
+            h2 += '<div style="padding:8px 0;border-bottom:1px solid var(--border-glass);font-size:13px"><a href="' + inc.url + '" target="_blank" style="color:var(--accent-bright);text-decoration:none">' + inc.title + '</a> <span style="color:var(--text-muted);font-size:11px">' + inc.source + ' &middot; Score: ' + inc.score + '</span></div>';
+          }
+          globalBtn.parentElement.innerHTML += h2;
+        });
+      });
+    }
+
+  }).catch(function(err) {
+    c.innerHTML = '<div style="padding:32px;color:var(--red)">' + err.message + '</div>';
   });
 }
 

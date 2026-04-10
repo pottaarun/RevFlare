@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import puppeteer from '@cloudflare/puppeteer';
-import { fetchThreatIntelligence, matchIncidentsToAccount, buildIncidentBDREmail, inferCloudflareProducts, type ThreatIncident } from './threat-intel';
+import { fetchThreatIntelligence, matchIncidentsToAccount } from './threat-intel';
 import { calculateLeadScore, calculateROI, scoreSimilarity, buildMeetingPrepPrompt, SEQUENCE_TEMPLATES, buildWinLossPrompt } from './advanced-features';
 
 // ── Types ──────────────────────────────────────────────────────────
@@ -1138,7 +1138,7 @@ function formatLiveResearch(lr: LiveResearchResult): string {
     if (lr.radar.rank) sections.push(`Domain Popularity: ${lr.radar.rank}`);
     if (lr.radar.categories.length) sections.push(`Category Rankings: ${lr.radar.categories.join(', ')}`);
     if (lr.radar.trafficTrend) sections.push(`HTTP Protocol Mix: ${lr.radar.trafficTrend}`);
-    sections.push(`Radar Page: https://radar.cloudflare.com/domains/domain/${lr.dns.aRecords.length ? '' : ''}${lr.website.title ? '' : ''}`);
+    // Radar link omitted — domain not available in this context
   }
 
   sections.push('\n=== END LIVE RESEARCH DATA ===');
@@ -2105,7 +2105,7 @@ async function decryptValue(stored: string, keyName: string): Promise<string> {
 // Save settings (encrypted)
 app.post('/api/settings', async (c) => {
   const { key, value } = await c.req.json<{ key: string; value: string }>();
-  const allowedKeys = ['google_client_id', 'google_client_secret', 'intricately_api_key', 'news_api_key', 'gnews_api_key', 'mediastack_api_key'];
+  const allowedKeys = ['google_client_id', 'google_client_secret', 'intricately_api_key', 'news_api_key', 'gnews_api_key', 'mediastack_api_key', 'sf_client_id', 'sf_client_secret'];
   if (!allowedKeys.includes(key)) return c.json({ error: 'Invalid setting' }, 400);
   const encrypted = await encryptValue(value, key);
   await c.env.DB.prepare(
@@ -2142,7 +2142,10 @@ app.get('/api/gmail/connect', async (c) => {
   if (!clientId) return c.json({ error: 'Google Client ID not configured. Use the Connect Gmail wizard to enter your credentials.' }, 500);
 
   const redirectUri = new URL('/api/gmail/callback', c.req.url).toString();
-  const state = c.get('userEmail'); // Pass user email as state
+  // CSRF-safe: hash the email with a nonce so it can't be spoofed
+  const nonce = crypto.randomUUID().slice(0, 8);
+  const stateRaw = nonce + ':' + c.get('userEmail');
+  const state = btoa(stateRaw);
 
   const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?` +
     `client_id=${encodeURIComponent(clientId)}` +
@@ -2159,7 +2162,9 @@ app.get('/api/gmail/connect', async (c) => {
 // OAuth callback
 app.get('/api/gmail/callback', async (c) => {
   const code = c.req.query('code');
-  const userEmail = c.req.query('state') || c.get('userEmail');
+  const stateParam = c.req.query('state') || '';
+  let userEmail = c.get('userEmail');
+  try { const decoded = atob(stateParam); userEmail = decoded.split(':').slice(1).join(':'); } catch { }
   if (!code) return c.html('<h2>Authorization failed</h2><p>No code received.</p>');
 
   const { clientId, clientSecret } = await getGoogleCreds(c.env.DB, c.env);
@@ -3036,6 +3041,189 @@ app.get('/api/team-stats', async (c) => {
     campaignsByUser: campaignsByUser.results,
     opportunitiesByUser: oppsByUser.results,
   });
+});
+
+// ══════════════════════════════════════════════════════════════════
+// SALESFORCE SYNC
+// ══════════════════════════════════════════════════════════════════
+
+// SF credentials from D1 settings
+async function getSFCreds(db: D1Database): Promise<{ clientId: string; clientSecret: string }> {
+  let cid = '', csec = '';
+  try {
+    const r1 = await db.prepare("SELECT value FROM app_settings WHERE key = 'sf_client_id'").first() as any;
+    const r2 = await db.prepare("SELECT value FROM app_settings WHERE key = 'sf_client_secret'").first() as any;
+    if (r1?.value) cid = await decryptValue(r1.value, 'sf_client_id');
+    if (r2?.value) csec = await decryptValue(r2.value, 'sf_client_secret');
+  } catch {}
+  return { clientId: cid, clientSecret: csec };
+}
+
+// SF OAuth connect
+app.get('/api/salesforce/connect', async (c) => {
+  const { clientId } = await getSFCreds(c.env.DB);
+  if (!clientId) return c.json({ error: 'Salesforce Client ID not configured. Save it in Settings.' }, 500);
+  const redirectUri = new URL('/api/salesforce/callback', c.req.url).toString();
+  const nonce = crypto.randomUUID().slice(0, 8);
+  const state = btoa(nonce + ':' + c.get('userEmail'));
+  const authUrl = `https://login.salesforce.com/services/oauth2/authorize?response_type=code&client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&state=${encodeURIComponent(state)}`;
+  return c.redirect(authUrl);
+});
+
+// SF OAuth callback
+app.get('/api/salesforce/callback', async (c) => {
+  const code = c.req.query('code');
+  const stateParam = c.req.query('state') || '';
+  let email = c.get('userEmail');
+  try { email = atob(stateParam).split(':').slice(1).join(':'); } catch {}
+
+  const { clientId, clientSecret } = await getSFCreds(c.env.DB);
+  if (!code || !clientId || !clientSecret) return c.html('<h2>Salesforce auth failed</h2>');
+
+  const redirectUri = new URL('/api/salesforce/callback', c.req.url).toString();
+  const tokenRes = await fetch('https://login.salesforce.com/services/oauth2/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ grant_type: 'authorization_code', code, client_id: clientId, client_secret: clientSecret, redirect_uri: redirectUri }),
+  });
+  if (!tokenRes.ok) return c.html('<h2>Token exchange failed</h2><pre>' + await tokenRes.text() + '</pre>');
+  const tokens = await tokenRes.json() as any;
+
+  await c.env.DB.prepare('INSERT INTO salesforce_tokens (user_email, instance_url, access_token, refresh_token, expires_at) VALUES (?,?,?,?,?) ON CONFLICT(user_email) DO UPDATE SET instance_url=excluded.instance_url, access_token=excluded.access_token, refresh_token=COALESCE(excluded.refresh_token,salesforce_tokens.refresh_token), expires_at=excluded.expires_at')
+    .bind(email, tokens.instance_url, tokens.access_token, tokens.refresh_token || '', Math.floor(Date.now()/1000) + 7200).run();
+
+  return c.html('<html><body style="background:#08090a;color:#f7f8f8;font-family:Inter,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh"><div style="text-align:center"><h2 style="color:#34d399">Salesforce Connected!</h2><p>You can close this window.</p><script>setTimeout(function(){window.close()},2000)</script></div></body></html>');
+});
+
+app.get('/api/salesforce/status', async (c) => {
+  const token = await c.env.DB.prepare('SELECT instance_url FROM salesforce_tokens WHERE user_email = ?').bind(c.get('userEmail')).first() as any;
+  return c.json({ connected: !!token, instanceUrl: token?.instance_url || '' });
+});
+
+// Push research/email as SF Task
+app.post('/api/salesforce/push-activity', async (c) => {
+  const email = c.get('userEmail');
+  const { accountName, subject, body, type } = await c.req.json<any>();
+  const sf = await c.env.DB.prepare('SELECT * FROM salesforce_tokens WHERE user_email = ?').bind(email).first() as any;
+  if (!sf) return c.json({ error: 'Salesforce not connected' }, 401);
+
+  // Search for the account in SF
+  const searchRes = await fetch(`${sf.instance_url}/services/data/v59.0/query?q=${encodeURIComponent(`SELECT Id FROM Account WHERE Name = '${accountName.replace(/'/g, "\\'")}'`)}`, {
+    headers: { 'Authorization': `Bearer ${sf.access_token}` },
+  });
+  const searchData = await searchRes.json() as any;
+  const accountId = searchData.records?.[0]?.Id;
+
+  // Create Task
+  const task: any = { Subject: subject || 'RevFlare: ' + type, Description: body?.slice(0, 32000), Status: 'Completed', Priority: 'Normal', Type: type || 'Email' };
+  if (accountId) task.WhatId = accountId;
+
+  const createRes = await fetch(`${sf.instance_url}/services/data/v59.0/sobjects/Task`, {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${sf.access_token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(task),
+  });
+
+  if (!createRes.ok) return c.json({ error: 'Failed to create SF task', detail: await createRes.text() }, 500);
+  const result = await createRes.json() as any;
+  return c.json({ success: true, taskId: result.id });
+});
+
+// Pull SF opportunities for an account
+app.get('/api/salesforce/opportunities/:accountName', async (c) => {
+  const sf = await c.env.DB.prepare('SELECT * FROM salesforce_tokens WHERE user_email = ?').bind(c.get('userEmail')).first() as any;
+  if (!sf) return c.json({ error: 'Salesforce not connected' }, 401);
+  const name = c.req.param('accountName');
+  const res = await fetch(`${sf.instance_url}/services/data/v59.0/query?q=${encodeURIComponent(`SELECT Id,Name,Amount,StageName,CloseDate,Type FROM Opportunity WHERE Account.Name = '${name.replace(/'/g, "\\'")}'`)}`, {
+    headers: { 'Authorization': `Bearer ${sf.access_token}` },
+  });
+  if (!res.ok) return c.json({ error: 'SF query failed' }, 500);
+  const data = await res.json() as any;
+  return c.json(data.records || []);
+});
+
+// ══════════════════════════════════════════════════════════════════
+// SEMANTIC SEARCH (AI Embeddings + D1 — lightweight RAG)
+// ══════════════════════════════════════════════════════════════════
+
+// Index content for search
+app.post('/api/search/index', async (c) => {
+  const email = c.get('userEmail');
+  // Re-index all research + messages for this user
+  await c.env.DB.prepare('DELETE FROM vectorize_cache WHERE user_email = ?').bind(email).run();
+
+  const [research, messages] = await Promise.all([
+    c.env.DB.prepare('SELECT id, account_id, title, content, report_type FROM research_reports WHERE user_email = ?').bind(email).all(),
+    c.env.DB.prepare('SELECT id, account_id, subject, content, persona, message_type FROM persona_messages WHERE user_email = ?').bind(email).all(),
+  ]);
+
+  const stmts: any[] = [];
+  for (const r of research.results as any[]) {
+    stmts.push(c.env.DB.prepare('INSERT INTO vectorize_cache (content_type, content_id, content_text, account_id, user_email) VALUES (?,?,?,?,?)')
+      .bind('research', r.id, (r.title || r.report_type) + ': ' + (r.content || '').slice(0, 2000), r.account_id, email));
+  }
+  for (const m of messages.results as any[]) {
+    stmts.push(c.env.DB.prepare('INSERT INTO vectorize_cache (content_type, content_id, content_text, account_id, user_email) VALUES (?,?,?,?,?)')
+      .bind('message', m.id, (m.persona || '') + ' ' + (m.message_type || '') + ': ' + (m.subject || '') + ' ' + (m.content || '').slice(0, 2000), m.account_id, email));
+  }
+
+  // Batch insert
+  for (let i = 0; i < stmts.length; i += 50) {
+    await c.env.DB.batch(stmts.slice(i, i + 50));
+  }
+
+  return c.json({ indexed: stmts.length, research: research.results.length, messages: messages.results.length });
+});
+
+// Semantic search using AI for relevance scoring
+app.get('/api/search', async (c) => {
+  const email = c.get('userEmail');
+  const query = c.req.query('q') || '';
+  if (!query) return c.json({ results: [] });
+
+  // Get all cached content
+  const cache = await c.env.DB.prepare('SELECT * FROM vectorize_cache WHERE user_email = ? ORDER BY created_at DESC LIMIT 500').bind(email).all();
+
+  // Simple keyword search (fast, no AI needed for basic queries)
+  const queryLower = query.toLowerCase();
+  const keywords = queryLower.split(/\s+/).filter((w: string) => w.length > 2);
+
+  const scored = (cache.results as any[]).map(item => {
+    const text = (item.content_text || '').toLowerCase();
+    let score = 0;
+    for (const kw of keywords) {
+      if (text.includes(kw)) score += 10;
+      // Boost title/subject matches
+      const firstLine = text.split(':')[0] || '';
+      if (firstLine.includes(kw)) score += 20;
+    }
+    // Exact phrase match
+    if (text.includes(queryLower)) score += 50;
+    return { ...item, score };
+  }).filter(item => item.score > 0).sort((a: any, b: any) => b.score - a.score).slice(0, 20);
+
+  // If few keyword results, use AI to re-rank
+  if (scored.length < 5 && cache.results.length > 0) {
+    const candidates = (cache.results as any[]).slice(0, 50).map((item, i) => `[${i}] ${(item.content_text || '').slice(0, 200)}`).join('\n');
+    try {
+      const aiResult = await runAI(c.env.AI, FAST_MODEL,
+        'You are a search engine. Given a query and a list of documents, return the indices of the most relevant documents as a JSON array of numbers. Return ONLY a JSON array like [0, 5, 12].',
+        `Query: "${query}"\n\nDocuments:\n${candidates}`
+      );
+      const indices = JSON.parse(aiResult.match(/\[[\d,\s]+\]/)?.[0] || '[]');
+      for (const idx of indices) {
+        if (idx < cache.results.length) {
+          const item = cache.results[idx] as any;
+          if (!scored.find((s: any) => s.id === item.id)) {
+            scored.push({ ...item, score: 30 - indices.indexOf(idx) });
+          }
+        }
+      }
+      scored.sort((a: any, b: any) => b.score - a.score);
+    } catch {}
+  }
+
+  return c.json({ results: scored.slice(0, 20), query, totalIndexed: cache.results.length });
 });
 
 // ══════════════════════════════════════════════════════════════════

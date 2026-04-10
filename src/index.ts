@@ -2048,6 +2048,48 @@ app.post('/api/public/:token/research', async (c) => {
 
 const GMAIL_SCOPES = 'https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/userinfo.email';
 
+// Helper: get Google OAuth creds from D1 settings (fallback to env secrets)
+async function getGoogleCreds(db: D1Database, env: Bindings): Promise<{ clientId: string; clientSecret: string }> {
+  let clientId = env.GOOGLE_CLIENT_ID || '';
+  let clientSecret = env.GOOGLE_CLIENT_SECRET || '';
+  if (!clientId) {
+    const row = await db.prepare("SELECT value FROM app_settings WHERE key = 'google_client_id'").first() as any;
+    if (row) clientId = row.value;
+  }
+  if (!clientSecret) {
+    const row = await db.prepare("SELECT value FROM app_settings WHERE key = 'google_client_secret'").first() as any;
+    if (row) clientSecret = row.value;
+  }
+  return { clientId, clientSecret };
+}
+
+// Save settings API
+app.post('/api/settings', async (c) => {
+  const email = c.get('userEmail');
+  const { key, value } = await c.req.json<{ key: string; value: string }>();
+  const allowedKeys = ['google_client_id', 'google_client_secret', 'intricately_api_key'];
+  if (!allowedKeys.includes(key)) return c.json({ error: 'Invalid setting' }, 400);
+  await c.env.DB.prepare(
+    'INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP'
+  ).bind(key, value).run();
+  return c.json({ success: true });
+});
+
+// Get settings status (don't expose values, just whether they're set)
+app.get('/api/settings/status', async (c) => {
+  const keys = ['google_client_id', 'google_client_secret', 'intricately_api_key'];
+  const result: Record<string, boolean> = {};
+  for (const key of keys) {
+    const row = await c.env.DB.prepare("SELECT value FROM app_settings WHERE key = ?").bind(key).first() as any;
+    result[key] = !!(row?.value);
+  }
+  // Also check env secrets
+  if (c.env.GOOGLE_CLIENT_ID) result.google_client_id = true;
+  if (c.env.GOOGLE_CLIENT_SECRET) result.google_client_secret = true;
+  if (c.env.INTRICATELY_API_KEY) result.intricately_api_key = true;
+  return c.json(result);
+});
+
 // Check if Gmail is connected
 app.get('/api/gmail/status', async (c) => {
   const email = c.get('userEmail');
@@ -2058,8 +2100,8 @@ app.get('/api/gmail/status', async (c) => {
 
 // Start OAuth flow
 app.get('/api/gmail/connect', async (c) => {
-  const clientId = c.env.GOOGLE_CLIENT_ID;
-  if (!clientId) return c.json({ error: 'GOOGLE_CLIENT_ID not configured. Set it via: wrangler secret put GOOGLE_CLIENT_ID' }, 500);
+  const { clientId } = await getGoogleCreds(c.env.DB, c.env);
+  if (!clientId) return c.json({ error: 'Google Client ID not configured. Use the Connect Gmail wizard to enter your credentials.' }, 500);
 
   const redirectUri = new URL('/api/gmail/callback', c.req.url).toString();
   const state = c.get('userEmail'); // Pass user email as state
@@ -2082,9 +2124,8 @@ app.get('/api/gmail/callback', async (c) => {
   const userEmail = c.req.query('state') || c.get('userEmail');
   if (!code) return c.html('<h2>Authorization failed</h2><p>No code received.</p>');
 
-  const clientId = c.env.GOOGLE_CLIENT_ID;
-  const clientSecret = c.env.GOOGLE_CLIENT_SECRET;
-  if (!clientId || !clientSecret) return c.html('<h2>Server misconfigured</h2>');
+  const { clientId, clientSecret } = await getGoogleCreds(c.env.DB, c.env);
+  if (!clientId || !clientSecret) return c.html('<h2>Google OAuth credentials not configured</h2><p>Use the Connect Gmail wizard in RevFlare to enter your Client ID and Secret.</p>');
 
   const redirectUri = new URL('/api/gmail/callback', c.req.url).toString();
 
@@ -2178,9 +2219,10 @@ app.post('/api/gmail/send', async (c) => {
   const { to, subject, body, accountId } = await c.req.json<{ to: string; subject: string; body: string; accountId?: number }>();
 
   if (!to || !subject || !body) return c.json({ error: 'Missing to, subject, or body' }, 400);
-  if (!c.env.GOOGLE_CLIENT_ID || !c.env.GOOGLE_CLIENT_SECRET) return c.json({ error: 'Gmail not configured on server' }, 500);
+  const { clientId: gci, clientSecret: gcs } = await getGoogleCreds(c.env.DB, c.env);
+  if (!gci || !gcs) return c.json({ error: 'Gmail not configured. Use the Connect Gmail wizard to enter credentials.' }, 500);
 
-  const accessToken = await refreshGmailToken(c.env.DB, email, c.env.GOOGLE_CLIENT_ID, c.env.GOOGLE_CLIENT_SECRET);
+  const accessToken = await refreshGmailToken(c.env.DB, email, gci, gcs);
   if (!accessToken) return c.json({ error: 'Gmail not connected. Click Connect Gmail first.' }, 401);
 
   const stored = await c.env.DB.prepare('SELECT gmail_address FROM gmail_tokens WHERE user_email = ?').bind(email).first() as any;
@@ -2224,9 +2266,10 @@ app.post('/api/gmail/send-campaign/:campaignId', async (c) => {
   const email = c.get('userEmail');
   const { emailIds, toField } = await c.req.json<{ emailIds: number[]; toField: string }>();
 
-  if (!c.env.GOOGLE_CLIENT_ID || !c.env.GOOGLE_CLIENT_SECRET) return c.json({ error: 'Gmail not configured' }, 500);
+  const { clientId: gci2, clientSecret: gcs2 } = await getGoogleCreds(c.env.DB, c.env);
+  if (!gci2 || !gcs2) return c.json({ error: 'Gmail not configured' }, 500);
 
-  const accessToken = await refreshGmailToken(c.env.DB, email, c.env.GOOGLE_CLIENT_ID, c.env.GOOGLE_CLIENT_SECRET);
+  const accessToken = await refreshGmailToken(c.env.DB, email, gci2, gcs2);
   if (!accessToken) return c.json({ error: 'Gmail not connected' }, 401);
 
   const stored = await c.env.DB.prepare('SELECT gmail_address FROM gmail_tokens WHERE user_email = ?').bind(email).first() as any;

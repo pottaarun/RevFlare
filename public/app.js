@@ -87,24 +87,15 @@ function navigate(){
 window.addEventListener('hashchange',navigate);
 window.addEventListener('DOMContentLoaded', function() {
   navigate();
-  // Check Gmail connection status and show in nav
-  // Always show the button first, then upgrade if connected
-  var navRight = document.querySelector('.nav-right');
-  if (navRight) {
-    navRight.insertAdjacentHTML('afterbegin', '<button class="btn btn-ghost btn-sm" style="font-size:11px;padding:4px 10px" id="gmail-setup-btn">' + IC.mail + ' Connect Gmail</button>');
-    document.getElementById('gmail-setup-btn').addEventListener('click', function() { showGmailSetupWizard(); });
-  }
+  // Check Gmail status - upgrade button to green badge if connected
   api.get('/gmail/status').then(function(g) {
     window._gmailConnected = g.connected;
     window._gmailAddress = g.gmailAddress || '';
-    if (navRight && g.connected) {
+    if (g.connected) {
       var btn = document.getElementById('gmail-setup-btn');
       if (btn) btn.outerHTML = '<span style="font-size:11px;color:var(--green);font-weight:600;padding:4px 10px;background:var(--green-bg);border:1px solid rgba(52,211,153,0.2);border-radius:var(--radius-pill);cursor:default" title="Connected: ' + g.gmailAddress + '">' + IC.mail + ' Gmail: ' + g.gmailAddress.split('@')[0] + '</span>';
     }
-  }).catch(function() {
-    // API failed (Access redirect, etc.) - button already shown, wizard handles it
-    window._gmailConnected = false;
-  });
+  }).catch(function() { window._gmailConnected = false; });
 
   // Fetch platform-wide stats for bottom bar
   api.get('/platform-stats').then(function(ps) {

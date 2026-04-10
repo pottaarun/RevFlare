@@ -49,6 +49,9 @@ CREATE TABLE IF NOT EXISTS email_variants (id INTEGER PRIMARY KEY AUTOINCREMENT,
 -- Voice Notes
 CREATE TABLE IF NOT EXISTS voice_notes (id INTEGER PRIMARY KEY AUTOINCREMENT, account_id INTEGER, transcript TEXT, generated_email TEXT, user_email TEXT NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
 
+-- Page/Tab Analytics
+CREATE TABLE IF NOT EXISTS page_views (id INTEGER PRIMARY KEY AUTOINCREMENT, page TEXT NOT NULL, tab TEXT, account_id INTEGER, user_email TEXT NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
+
 -- Semantic Search Cache
 CREATE TABLE IF NOT EXISTS vectorize_cache (id INTEGER PRIMARY KEY AUTOINCREMENT, content_type TEXT NOT NULL, content_id INTEGER NOT NULL, content_text TEXT NOT NULL, account_id INTEGER, user_email TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
 
@@ -71,3 +74,5 @@ CREATE INDEX IF NOT EXISTS idx_opp_user ON opportunities(user_email);
 CREATE INDEX IF NOT EXISTS idx_probe_hist ON probe_history(account_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_alerts_user ON alerts(user_email, read);
 CREATE INDEX IF NOT EXISTS idx_vec_cache ON vectorize_cache(user_email, content_type);
+CREATE INDEX IF NOT EXISTS idx_page_views_user ON page_views(user_email, page);
+CREATE INDEX IF NOT EXISTS idx_page_views_time ON page_views(created_at);

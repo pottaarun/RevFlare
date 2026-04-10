@@ -57,6 +57,11 @@ function getCache(accountId) {
 const $=s=>document.querySelector(s);
 const $$=s=>[...document.querySelectorAll(s)];
 
+// ── Analytics: fire-and-forget page/tab tracking ──────────────────
+function track(page, tab, accountId) {
+  try { fetch('/api/track', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ page:page||'', tab:tab||'', accountId:accountId||null }) }); } catch(_){}
+}
+
 function fmt(n,p=''){if(n==null||n==='')return'--';const v=typeof n==='number'?n:parseFloat(String(n).replace(/[$,]/g,''));if(isNaN(v))return String(n);if(v>=1e6)return`${p}${(v/1e6).toFixed(1)}M`;if(v>=1e3)return`${p}${(v/1e3).toFixed(0)}K`;return`${p}${v.toLocaleString()}`;}
 function fmtD(n){return fmt(n,'$');}
 function pct(n){return n!=null?(n*100).toFixed(0)+'%':'--';}
@@ -81,6 +86,10 @@ function md(s){if(!s)return'';
 function navigate(){
   const h=location.hash||'#/';const m=$('#main');
   $$('.nav-link').forEach(l=>l.classList.toggle('active',l.getAttribute('href')===h||(h.startsWith('#/account')&&l.dataset.route==='dashboard')));
+  // Track page view
+  var pageName = h==='#/'?'dashboard':h.replace('#/','').split('/')[0];
+  var acctId = h.startsWith('#/account/')?parseInt(h.split('/')[2]):null;
+  track(pageName, null, acctId);
   if(h==='#/upload')renderUpload(m);
   else if(h==='#/threats')renderGlobalThreats(m);
   else if(h==='#/campaigns')renderCampaigns(m);
@@ -92,6 +101,7 @@ function navigate(){
   else if(h.startsWith('#/search/'))renderSearch(m,decodeURIComponent(h.split('/').slice(2).join('/')));
   else if(h.startsWith('#/campaign/'))renderCampaignDetail(m,h.split('/')[2]);
   else if(h.startsWith('#/share/'))renderShareView(m,h.split('/')[2]);
+  else if(h==='#/analytics')renderAnalytics(m);
   else if(h.startsWith('#/account/'))renderAccount(m,h.split('/')[2]);
   else renderDashboard(m);
 }
@@ -377,7 +387,7 @@ async function renderAccount(c,id){
       <div id="tc"></div>
     </div>`;
 
-    $$('#tabs .tab').forEach(t=>t.onclick=()=>{$$('#tabs .tab').forEach(x=>x.classList.remove('active'));t.classList.add('active');S.activeTab=t.dataset.t;renderTab(a);});
+    $$('#tabs .tab').forEach(t=>t.onclick=()=>{$$('#tabs .tab').forEach(x=>x.classList.remove('active'));t.classList.add('active');S.activeTab=t.dataset.t;track('account',t.dataset.t,a.id);renderTab(a);});
     renderTab(a);
 
     // Share button handler
@@ -2852,6 +2862,116 @@ function runVoiceNote(a, out) {
       btn.disabled = false;
       btn.innerHTML = IC.sparkles + ' Generate Follow-Up Email';
     });
+  });
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ANALYTICS DASHBOARD
+// ══════════════════════════════════════════════════════════════════
+function renderAnalytics(c) {
+  c.innerHTML = '<div class="loading-state"><div class="spinner"></div>Loading analytics...</div>';
+
+  api.get('/analytics?days=30').then(function(data) {
+    var h = '<div class="fade-in">';
+    h += '<div class="page-header"><h1 class="page-title">Usage Analytics</h1>';
+    h += '<p class="page-subtitle">Page and tab visit tracking across all users (last ' + data.days + ' days).</p></div>';
+
+    // Top stats
+    h += '<div class="stats-row">';
+    h += '<div class="stat-card sc-accounts"><div class="stat-icon">\u{1F4CA}</div><div class="stat-label">Total Views</div><div class="stat-value" style="color:#93bbfd">' + (data.totalViews || 0) + '</div></div>';
+    var topPage = (data.byPage || [])[0];
+    h += '<div class="stat-card sc-revenue"><div class="stat-icon">\u{1F525}</div><div class="stat-label">Most Visited Page</div><div class="stat-value" style="color:#6ee7b7;font-size:22px">' + (topPage ? topPage.page : '--') + '</div><div class="stat-sub">' + (topPage ? topPage.views + ' views' : '') + '</div></div>';
+    var topTab = (data.byTab || [])[0];
+    h += '<div class="stat-card sc-spend"><div class="stat-icon">\u{1F3AF}</div><div class="stat-label">Most Used Tab</div><div class="stat-value" style="color:#c4b5fd;font-size:22px">' + (topTab ? topTab.tab : '--') + '</div><div class="stat-sub">' + (topTab ? topTab.views + ' views' : '') + '</div></div>';
+    h += '</div>';
+
+    // Pages table + Tabs table side by side
+    h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-top:24px">';
+
+    // Pages
+    h += '<div class="d-card"><div class="d-card-title">' + IC.bar + ' Page Views</div>';
+    h += '<table style="width:100%"><thead><tr><th>Page</th><th>Views</th><th>%</th></tr></thead><tbody>';
+    var pages = data.byPage || [];
+    var maxP = pages.length ? pages[0].views : 1;
+    for (var i = 0; i < pages.length; i++) {
+      var pg = pages[i];
+      var pct = data.totalViews ? ((pg.views / data.totalViews) * 100).toFixed(1) : '0';
+      h += '<tr><td style="font-weight:600;color:var(--text-primary)">' + esc(pg.page) + '</td>';
+      h += '<td style="font-weight:700;color:var(--blue)">' + pg.views + '</td>';
+      h += '<td><div style="display:flex;align-items:center;gap:6px"><div style="width:60px;height:5px;border-radius:3px;background:rgba(255,255,255,0.04);overflow:hidden"><div style="height:100%;width:' + ((pg.views/maxP)*100).toFixed(0) + '%;background:var(--blue);border-radius:3px"></div></div><span style="font-size:11px;color:var(--text-muted)">' + pct + '%</span></div></td></tr>';
+    }
+    if (!pages.length) h += '<tr><td colspan="3" style="text-align:center;padding:24px;color:var(--text-muted)">No page views recorded yet</td></tr>';
+    h += '</tbody></table></div>';
+
+    // Tabs
+    h += '<div class="d-card"><div class="d-card-title">' + IC.target + ' Tab Views (Account Detail)</div>';
+    h += '<table style="width:100%"><thead><tr><th>Tab</th><th>Views</th><th>%</th></tr></thead><tbody>';
+    var tabs = data.byTab || [];
+    var totalTabs = tabs.reduce(function(s,t){return s+t.views},0) || 1;
+    var maxT = tabs.length ? tabs[0].views : 1;
+    for (var i = 0; i < tabs.length; i++) {
+      var tb = tabs[i];
+      var tpct = ((tb.views / totalTabs) * 100).toFixed(1);
+      var tabColors = {overview:'var(--green)',research:'var(--blue)',threats:'var(--red)',competitive:'var(--amber)',messaging:'var(--accent-bright)',advanced:'var(--purple)',history:'var(--text-muted)'};
+      var tc = tabColors[tb.tab] || 'var(--text-muted)';
+      h += '<tr><td style="font-weight:600;color:' + tc + '">' + esc(tb.tab) + '</td>';
+      h += '<td style="font-weight:700;color:' + tc + '">' + tb.views + '</td>';
+      h += '<td><div style="display:flex;align-items:center;gap:6px"><div style="width:60px;height:5px;border-radius:3px;background:rgba(255,255,255,0.04);overflow:hidden"><div style="height:100%;width:' + ((tb.views/maxT)*100).toFixed(0) + '%;background:' + tc + ';border-radius:3px"></div></div><span style="font-size:11px;color:var(--text-muted)">' + tpct + '%</span></div></td></tr>';
+    }
+    if (!tabs.length) h += '<tr><td colspan="3" style="text-align:center;padding:24px;color:var(--text-muted)">No tab views recorded yet</td></tr>';
+    h += '</tbody></table></div>';
+    h += '</div>';
+
+    // Daily trend
+    var days = (data.byDay || []).reverse();
+    if (days.length) {
+      h += '<div class="d-card" style="margin-top:20px"><div class="d-card-title">' + IC.bar + ' Daily Trend</div>';
+      h += '<div style="display:flex;align-items:flex-end;gap:4px;height:120px;padding:8px 0">';
+      var maxD = Math.max.apply(null, days.map(function(d){return d.views})) || 1;
+      for (var i = 0; i < days.length; i++) {
+        var d = days[i];
+        var bh = Math.max(4, (d.views / maxD) * 100);
+        h += '<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px" title="' + d.day + ': ' + d.views + ' views">';
+        h += '<span style="font-size:9px;color:var(--text-muted)">' + d.views + '</span>';
+        h += '<div style="width:100%;height:' + bh + 'px;background:var(--accent-bright);border-radius:3px 3px 0 0;min-width:8px"></div>';
+        h += '<span style="font-size:8px;color:var(--text-muted);white-space:nowrap">' + (d.day || '').slice(5) + '</span>';
+        h += '</div>';
+      }
+      h += '</div></div>';
+    }
+
+    // User activity
+    var users = data.byUser || [];
+    if (users.length) {
+      h += '<div class="d-card" style="margin-top:20px"><div class="d-card-title">' + IC.target + ' User Activity</div>';
+      h += '<table style="width:100%"><thead><tr><th>User</th><th>Views</th></tr></thead><tbody>';
+      for (var i = 0; i < users.length; i++) {
+        var u = users[i];
+        h += '<tr><td style="font-weight:600;color:var(--text-primary)">' + esc(u.user_email) + '</td>';
+        h += '<td style="font-weight:700;color:var(--green)">' + u.views + '</td></tr>';
+      }
+      h += '</tbody></table></div>';
+    }
+
+    // Recent activity
+    var recent = data.recent || [];
+    if (recent.length) {
+      h += '<div class="d-card" style="margin-top:20px"><div class="d-card-title">' + IC.zap + ' Recent Activity (last 50)</div>';
+      h += '<table style="width:100%"><thead><tr><th>Page</th><th>Tab</th><th>User</th><th>Time</th></tr></thead><tbody>';
+      for (var i = 0; i < recent.length; i++) {
+        var r = recent[i];
+        h += '<tr><td style="color:var(--text-primary)">' + esc(r.page) + '</td>';
+        h += '<td style="color:var(--accent-bright)">' + esc(r.tab || '--') + '</td>';
+        h += '<td style="font-size:12px;color:var(--text-muted)">' + esc((r.user_email||'').split('@')[0]) + '</td>';
+        h += '<td style="font-size:12px;color:var(--text-muted)">' + timeAgo(r.created_at) + '</td></tr>';
+      }
+      h += '</tbody></table></div>';
+    }
+
+    h += '</div>';
+    c.innerHTML = h;
+  }).catch(function(err) {
+    c.innerHTML = '<div style="padding:32px;color:var(--red)">' + err.message + '</div>';
   });
 }
 

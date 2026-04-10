@@ -77,6 +77,46 @@ app.get('/api/me', async (c) => {
   return c.json({ email, accountCount: (count as any)?.cnt || 0 });
 });
 
+// ── Page View Analytics ────────────────────────────────────────────
+app.post('/api/track', async (c) => {
+  const email = c.get('userEmail');
+  const { page, tab, accountId } = await c.req.json<{ page: string; tab?: string; accountId?: number }>().catch(() => ({ page: '', tab: undefined, accountId: undefined }));
+  if (!page) return c.json({ ok: true });
+  // Fire-and-forget insert, don't block the response
+  c.executionCtx.waitUntil(
+    c.env.DB.prepare(
+      'INSERT INTO page_views (page, tab, account_id, user_email) VALUES (?, ?, ?, ?)'
+    ).bind(page.slice(0, 50), (tab || '').slice(0, 50) || null, accountId || null, email).run()
+  );
+  return c.json({ ok: true });
+});
+
+app.get('/api/analytics', async (c) => {
+  const email = c.get('userEmail');
+  const days = Math.min(parseInt(c.req.query('days') || '30') || 30, 90);
+  const since = new Date(Date.now() - days * 86400000).toISOString();
+
+  const [byPage, byTab, byUser, byDay, recent] = await Promise.all([
+    c.env.DB.prepare('SELECT page, COUNT(*) as views FROM page_views WHERE created_at >= ? GROUP BY page ORDER BY views DESC').bind(since).all(),
+    c.env.DB.prepare('SELECT tab, COUNT(*) as views FROM page_views WHERE tab IS NOT NULL AND tab != "" AND created_at >= ? GROUP BY tab ORDER BY views DESC').bind(since).all(),
+    c.env.DB.prepare('SELECT user_email, COUNT(*) as views FROM page_views WHERE created_at >= ? GROUP BY user_email ORDER BY views DESC LIMIT 20').bind(since).all(),
+    c.env.DB.prepare("SELECT DATE(created_at) as day, COUNT(*) as views FROM page_views WHERE created_at >= ? GROUP BY DATE(created_at) ORDER BY day DESC LIMIT 30").bind(since).all(),
+    c.env.DB.prepare('SELECT page, tab, user_email, created_at FROM page_views ORDER BY created_at DESC LIMIT 50').all(),
+  ]);
+
+  const total = (byPage.results as any[]).reduce((s: number, r: any) => s + r.views, 0);
+
+  return c.json({
+    totalViews: total,
+    days,
+    byPage: byPage.results,
+    byTab: byTab.results,
+    byUser: byUser.results,
+    byDay: byDay.results,
+    recent: recent.results,
+  });
+});
+
 // ── Global platform stats (all users combined) ────────────────────
 app.get('/api/platform-stats', async (c) => {
   const [emails, research, campaigns, users] = await Promise.all([

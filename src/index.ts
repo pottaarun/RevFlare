@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import puppeteer from '@cloudflare/puppeteer';
 import { fetchThreatIntelligence, matchIncidentsToAccount, buildIncidentBDREmail, inferCloudflareProducts, type ThreatIncident } from './threat-intel';
+import { calculateLeadScore, calculateROI, scoreSimilarity, buildMeetingPrepPrompt, SEQUENCE_TEMPLATES, buildWinLossPrompt } from './advanced-features';
 
 // ── Types ──────────────────────────────────────────────────────────
 type Bindings = {
@@ -2778,6 +2779,266 @@ STRUCTURE:
 });
 
 // ══════════════════════════════════════════════════════════════════
+// ADVANCED FEATURES
+// ══════════════════════════════════════════════════════════════════
+
+// ── Lead Scoring ───────────────────────────────────────────────────
+app.get('/api/lead-scores', async (c) => {
+  const email = c.get('userEmail');
+  const limit = parseInt(c.req.query('limit') || '20');
+  const accounts = await c.env.DB.prepare(
+    'SELECT * FROM accounts WHERE user_email = ? ORDER BY total_it_spend DESC LIMIT 200'
+  ).bind(email).all();
+
+  const scored = accounts.results.map((a: any) => {
+    const { score, factors } = calculateLeadScore(a);
+    return { id: a.id, account_name: a.account_name, industry: a.industry, score, factors, total_it_spend: a.total_it_spend, current_monthly_fee: a.current_monthly_fee, cdn_primary: a.cdn_primary, security_primary: a.security_primary };
+  }).sort((a: any, b: any) => b.score - a.score).slice(0, limit);
+
+  // Persist scores
+  for (const s of scored) {
+    await c.env.DB.prepare('INSERT INTO lead_scores (account_id, score, factors, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP) ON CONFLICT(account_id) DO UPDATE SET score=excluded.score, factors=excluded.factors, updated_at=CURRENT_TIMESTAMP')
+      .bind(s.id, s.score, JSON.stringify(s.factors)).run();
+  }
+
+  return c.json(scored);
+});
+
+app.get('/api/lead-scores/:accountId', async (c) => {
+  const account = await c.env.DB.prepare('SELECT * FROM accounts WHERE id = ? AND user_email = ?').bind(c.req.param('accountId'), c.get('userEmail')).first();
+  if (!account) return c.json({ error: 'Account not found' }, 404);
+  return c.json(calculateLeadScore(account));
+});
+
+// ── ROI Calculator ─────────────────────────────────────────────────
+app.get('/api/roi/:accountId', async (c) => {
+  const account = await c.env.DB.prepare('SELECT * FROM accounts WHERE id = ? AND user_email = ?').bind(c.req.param('accountId'), c.get('userEmail')).first();
+  if (!account) return c.json({ error: 'Account not found' }, 404);
+  return c.json(calculateROI(account));
+});
+
+// ── Account Lookalikes ─────────────────────────────────────────────
+app.get('/api/lookalikes/:accountId', async (c) => {
+  const email = c.get('userEmail');
+  const refAccount = await c.env.DB.prepare('SELECT * FROM accounts WHERE id = ? AND user_email = ?').bind(c.req.param('accountId'), email).first();
+  if (!refAccount) return c.json({ error: 'Account not found' }, 404);
+
+  const allAccounts = await c.env.DB.prepare('SELECT * FROM accounts WHERE user_email = ? AND id != ?').bind(email, refAccount.id).all();
+  const scored = allAccounts.results.map((a: any) => ({
+    id: a.id, account_name: a.account_name, industry: a.industry, total_it_spend: a.total_it_spend,
+    employees: a.employees, cdn_primary: a.cdn_primary, security_primary: a.security_primary,
+    billing_country: a.billing_country, similarity: scoreSimilarity(a, refAccount),
+  })).filter((a: any) => a.similarity > 20).sort((a: any, b: any) => b.similarity - a.similarity).slice(0, 20);
+
+  return c.json({ reference: { id: refAccount.id, account_name: (refAccount as any).account_name }, lookalikes: scored });
+});
+
+// ── Meeting Prep ───────────────────────────────────────────────────
+app.post('/api/meeting-prep/:accountId', async (c) => {
+  const account = await c.env.DB.prepare('SELECT * FROM accounts WHERE id = ? AND user_email = ?').bind(c.req.param('accountId'), c.get('userEmail')).first();
+  if (!account) return c.json({ error: 'Account not found' }, 404);
+
+  const ctx = buildAccountContext(account);
+  const research = await c.env.DB.prepare('SELECT content FROM research_reports WHERE account_id = ? ORDER BY created_at DESC LIMIT 1').bind(account.id).first();
+  const messages = await c.env.DB.prepare('SELECT content FROM persona_messages WHERE account_id = ? ORDER BY created_at DESC LIMIT 1').bind(account.id).first();
+
+  const prompt = buildMeetingPrepPrompt(account, ctx, (research as any)?.content || '', (messages as any)?.content || '');
+  const content = await runAI(c.env.AI, EMAIL_MODEL, 'You are preparing a sales rep for an important customer call. Be concise, specific, and actionable.', prompt);
+
+  await c.env.DB.prepare('INSERT INTO meeting_preps (account_id, content, user_email) VALUES (?, ?, ?)').bind(account.id, content, c.get('userEmail')).run();
+  return c.json({ content, accountName: (account as any).account_name });
+});
+
+// ── Sequences ──────────────────────────────────────────────────────
+app.get('/api/sequence-templates', (c) => c.json(SEQUENCE_TEMPLATES));
+
+app.post('/api/sequences', async (c) => {
+  const email = c.get('userEmail');
+  const { name, account_id, persona, template_key, theme } = await c.req.json<any>();
+
+  const account = await c.env.DB.prepare('SELECT * FROM accounts WHERE id = ? AND user_email = ?').bind(account_id, email).first();
+  if (!account) return c.json({ error: 'Account not found' }, 404);
+
+  const template = SEQUENCE_TEMPLATES[template_key];
+  if (!template) return c.json({ error: 'Invalid template' }, 400);
+
+  // Generate content for each touch
+  const ctx = buildAccountContext(account);
+  const touches: any[] = [];
+
+  for (const touch of template.touches) {
+    const system = `You are a ${persona.toUpperCase()} at Cloudflare writing touch ${touches.length + 1} of a ${template.touches.length}-touch sequence.
+Channel: ${touch.channel}. Goal: ${touch.description}.
+${touches.length > 0 ? 'Previous touches have been sent. This is a follow-up — reference the sequence naturally.' : 'This is the first touch.'}
+Keep it concise. ${touch.channel === 'linkedin' ? '300 chars max.' : touch.channel === 'phone' ? 'Call script format with talk track.' : '200-300 words.'}`;
+
+    const prompt = `Generate touch ${touches.length + 1}: ${touch.description}\n\nAccount: ${(account as any).account_name}\n${ctx.slice(0, 4000)}`;
+    const content = await runAI(c.env.AI, EMAIL_MODEL, system, prompt);
+    touches.push({ ...touch, content, generated: true });
+  }
+
+  const r = await c.env.DB.prepare('INSERT INTO sequences (name, account_id, persona, theme, status, touches, user_email) VALUES (?,?,?,?,?,?,?)')
+    .bind(name || template.name + ' — ' + (account as any).account_name, account_id, persona, theme || template_key, 'generated', JSON.stringify(touches), email).run();
+
+  return c.json({ id: r.meta.last_row_id, name, touches });
+});
+
+app.get('/api/sequences', async (c) => {
+  const seqs = await c.env.DB.prepare('SELECT * FROM sequences WHERE user_email = ? ORDER BY created_at DESC').bind(c.get('userEmail')).all();
+  return c.json(seqs.results.map((s: any) => ({ ...s, touches: JSON.parse(s.touches || '[]') })));
+});
+
+// ── Change Detection ───────────────────────────────────────────────
+app.post('/api/detect-changes/:accountId', async (c) => {
+  const account = await c.env.DB.prepare('SELECT * FROM accounts WHERE id = ? AND user_email = ?').bind(c.req.param('accountId'), c.get('userEmail')).first();
+  if (!account) return c.json({ error: 'Account not found' }, 404);
+
+  const domain = String((account as any).website || (account as any).website_domain || '');
+  if (!domain) return c.json({ changes: [], message: 'No domain to probe' });
+
+  // Run live probes
+  const clean = domain.replace(/^https?:\/\//, '').replace(/\/.*/, '');
+  const [probe, dns] = await Promise.all([probeDomain(clean), lookupDNS(clean)]);
+
+  const currentHash = JSON.stringify({ cdn: probe.cdnDetected, dns: dns.dnsProvider, server: probe.serverInfo, headers: probe.securityHeaders });
+
+  // Get last probe
+  const lastProbe = await c.env.DB.prepare('SELECT * FROM probe_history WHERE account_id = ? ORDER BY created_at DESC LIMIT 1').bind((account as any).id).first() as any;
+
+  // Save current probe
+  await c.env.DB.prepare('INSERT INTO probe_history (account_id, cdn_detected, dns_provider, security_headers, server_info, probe_hash) VALUES (?,?,?,?,?,?)')
+    .bind((account as any).id, probe.cdnDetected, dns.dnsProvider, JSON.stringify(probe.securityHeaders), probe.serverInfo, currentHash).run();
+
+  const changes: { type: string; field: string; from: string; to: string }[] = [];
+  if (lastProbe) {
+    if (lastProbe.cdn_detected !== probe.cdnDetected) changes.push({ type: 'CDN Change', field: 'cdn', from: lastProbe.cdn_detected || 'unknown', to: probe.cdnDetected || 'unknown' });
+    if (lastProbe.dns_provider !== dns.dnsProvider) changes.push({ type: 'DNS Provider Change', field: 'dns', from: lastProbe.dns_provider || 'unknown', to: dns.dnsProvider || 'unknown' });
+    if (lastProbe.server_info !== probe.serverInfo) changes.push({ type: 'Server Change', field: 'server', from: lastProbe.server_info || 'unknown', to: probe.serverInfo || 'unknown' });
+
+    // Generate alerts for changes
+    for (const change of changes) {
+      await c.env.DB.prepare('INSERT INTO alerts (account_id, alert_type, title, detail, severity, user_email) VALUES (?,?,?,?,?,?)')
+        .bind((account as any).id, 'infrastructure_change', change.type + ': ' + (account as any).account_name,
+          change.from + ' → ' + change.to, 'high', c.get('userEmail')).run();
+    }
+  }
+
+  return c.json({ changes, isFirstProbe: !lastProbe, current: { cdn: probe.cdnDetected, dns: dns.dnsProvider, server: probe.serverInfo } });
+});
+
+// ── Alerts ──────────────────────────────────────────────────────────
+app.get('/api/alerts', async (c) => {
+  const alerts = await c.env.DB.prepare('SELECT * FROM alerts WHERE user_email = ? ORDER BY created_at DESC LIMIT 50').bind(c.get('userEmail')).all();
+  return c.json(alerts.results);
+});
+
+app.post('/api/alerts/:id/read', async (c) => {
+  await c.env.DB.prepare('UPDATE alerts SET read = 1 WHERE id = ? AND user_email = ?').bind(c.req.param('id'), c.get('userEmail')).run();
+  return c.json({ success: true });
+});
+
+// ── Win/Loss Analysis ──────────────────────────────────────────────
+app.post('/api/win-loss/:opportunityId', async (c) => {
+  const opp = await c.env.DB.prepare('SELECT * FROM opportunities WHERE id = ? AND user_email = ?').bind(c.req.param('opportunityId'), c.get('userEmail')).first() as any;
+  if (!opp) return c.json({ error: 'Opportunity not found' }, 404);
+
+  let account: any = {};
+  let ctx = '';
+  if (opp.account_id) {
+    account = await c.env.DB.prepare('SELECT * FROM accounts WHERE id = ?').bind(opp.account_id).first() || {};
+    ctx = buildAccountContext(account);
+  }
+
+  const prompt = buildWinLossPrompt(opp, account, ctx);
+  const content = await runAI(c.env.AI, RESEARCH_MODEL, 'You are a sales operations analyst performing win/loss analysis. Be data-driven and actionable.', prompt);
+  return c.json({ content, opportunity: opp });
+});
+
+// ── Playbooks ──────────────────────────────────────────────────────
+app.get('/api/playbooks', async (c) => {
+  const playbooks = await c.env.DB.prepare('SELECT * FROM playbooks ORDER BY usage_count DESC').all();
+  return c.json(playbooks.results);
+});
+
+app.post('/api/playbooks', async (c) => {
+  const { name, persona, industry, template } = await c.req.json<any>();
+  const r = await c.env.DB.prepare('INSERT INTO playbooks (name, persona, industry, template, created_by) VALUES (?,?,?,?,?)')
+    .bind(name, persona, industry || '', template, c.get('userEmail')).run();
+  return c.json({ id: r.meta.last_row_id });
+});
+
+app.post('/api/playbooks/:id/use', async (c) => {
+  await c.env.DB.prepare('UPDATE playbooks SET usage_count = usage_count + 1 WHERE id = ?').bind(c.req.param('id')).run();
+  const pb = await c.env.DB.prepare('SELECT * FROM playbooks WHERE id = ?').bind(c.req.param('id')).first();
+  return c.json(pb);
+});
+
+// ── Email A/B Variants ─────────────────────────────────────────────
+app.post('/api/ab-test/:accountId', async (c) => {
+  const { persona, messageType, customContext } = await c.req.json<any>();
+  const account = await c.env.DB.prepare('SELECT * FROM accounts WHERE id = ? AND user_email = ?').bind(c.req.param('accountId'), c.get('userEmail')).first();
+  if (!account) return c.json({ error: 'Account not found' }, 404);
+
+  const ctx = buildAccountContext(account);
+  const personaConfig = PERSONA_CONFIGS[persona];
+  if (!personaConfig) return c.json({ error: 'Invalid persona' }, 400);
+
+  // Generate two variants in parallel
+  const systemA = `You are a ${personaConfig.title} at Cloudflare. VARIANT A: Lead with a BUSINESS OUTCOME hook. Focus on ROI and cost savings. ${personaConfig.tone}`;
+  const systemB = `You are a ${personaConfig.title} at Cloudflare. VARIANT B: Lead with a TECHNICAL INSIGHT hook. Focus on architecture and performance. ${personaConfig.tone}`;
+  const prompt = `Generate a ${messageType} for ${(account as any).account_name}:\n${ctx.slice(0, 6000)}\n${customContext ? 'Context: ' + customContext : ''}`;
+
+  const [a, b] = await Promise.all([
+    runAI(c.env.AI, EMAIL_MODEL, systemA, prompt),
+    runAI(c.env.AI, EMAIL_MODEL, systemB, prompt),
+  ]);
+
+  return c.json({ variantA: a, variantB: b, accountName: (account as any).account_name });
+});
+
+// ── Voice Notes ────────────────────────────────────────────────────
+app.post('/api/voice-note', async (c) => {
+  const { accountId, transcript } = await c.req.json<any>();
+  const email = c.get('userEmail');
+
+  let accountCtx = '';
+  let accountName = 'the prospect';
+  if (accountId) {
+    const account = await c.env.DB.prepare('SELECT * FROM accounts WHERE id = ? AND user_email = ?').bind(accountId, email).first();
+    if (account) { accountCtx = buildAccountContext(account); accountName = (account as any).account_name; }
+  }
+
+  const system = `You are a sales assistant. A rep just finished a call and dictated notes. Generate a professional follow-up email based on their notes. Reference specific things discussed. Be warm but professional.`;
+  const prompt = `Call notes (transcribed): "${transcript}"\n\nAccount: ${accountName}\n${accountCtx.slice(0, 4000)}\n\nGenerate a follow-up email starting with Subject: line.`;
+
+  const generatedEmail = await runAI(c.env.AI, EMAIL_MODEL, system, prompt);
+
+  await c.env.DB.prepare('INSERT INTO voice_notes (account_id, transcript, generated_email, user_email) VALUES (?,?,?,?)')
+    .bind(accountId || null, transcript, generatedEmail, email).run();
+
+  return c.json({ email: generatedEmail, transcript });
+});
+
+// ── Team Dashboard ─────────────────────────────────────────────────
+app.get('/api/team-stats', async (c) => {
+  const [users, emailsByUser, researchByUser, campaignsByUser, oppsByUser] = await Promise.all([
+    c.env.DB.prepare('SELECT DISTINCT user_email FROM accounts WHERE user_email != ""').all(),
+    c.env.DB.prepare('SELECT user_email, COUNT(*) as cnt FROM persona_messages GROUP BY user_email ORDER BY cnt DESC').all(),
+    c.env.DB.prepare('SELECT user_email, COUNT(*) as cnt FROM research_reports GROUP BY user_email ORDER BY cnt DESC').all(),
+    c.env.DB.prepare('SELECT user_email, COUNT(*) as cnt FROM campaigns GROUP BY user_email ORDER BY cnt DESC').all(),
+    c.env.DB.prepare('SELECT user_email, COUNT(*) as cnt, SUM(acv) as total_acv FROM opportunities GROUP BY user_email ORDER BY total_acv DESC').all(),
+  ]);
+
+  return c.json({
+    users: users.results,
+    emailsByUser: emailsByUser.results,
+    researchByUser: researchByUser.results,
+    campaignsByUser: campaignsByUser.results,
+    opportunitiesByUser: oppsByUser.results,
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════
 // OPPORTUNITY MANAGEMENT & ACV TRACKING
 // ══════════════════════════════════════════════════════════════════
 
@@ -2940,4 +3201,58 @@ Based on the account's spend profile, estimate potential savings and efficiency 
   return c.json({ detected, accountName: account.account_name });
 });
 
-export default app;
+// ── Scheduled: Nightly change detection + threat matching ──────────
+const worker = {
+  fetch: app.fetch,
+  async scheduled(event: ScheduledEvent, env: Bindings, ctx: ExecutionContext) {
+    // Get all unique user emails
+    const users = await env.DB.prepare('SELECT DISTINCT user_email FROM accounts WHERE user_email != ""').all();
+
+    for (const user of users.results as any[]) {
+      const email = user.user_email;
+      // Get top 50 accounts by IT spend for this user
+      const accounts = await env.DB.prepare('SELECT id, account_name, website, website_domain, industry, billing_country FROM accounts WHERE user_email = ? ORDER BY total_it_spend DESC LIMIT 50').bind(email).all();
+
+      for (const a of accounts.results as any[]) {
+        const domain = String(a.website || a.website_domain || '');
+        if (!domain) continue;
+        const clean = domain.replace(/^https?:\/\//, '').replace(/\/.*/, '');
+
+        try {
+          // Quick probe (no Puppeteer — just HTTP + DNS for speed)
+          const [probe, dns] = await Promise.all([probeDomain(clean), lookupDNS(clean)]);
+
+          const lastProbe = await env.DB.prepare('SELECT * FROM probe_history WHERE account_id = ? ORDER BY created_at DESC LIMIT 1').bind(a.id).first() as any;
+
+          await env.DB.prepare('INSERT INTO probe_history (account_id, cdn_detected, dns_provider, security_headers, server_info, probe_hash) VALUES (?,?,?,?,?,?)')
+            .bind(a.id, probe.cdnDetected, dns.dnsProvider, JSON.stringify(probe.securityHeaders), probe.serverInfo, '').run();
+
+          if (lastProbe) {
+            if (lastProbe.cdn_detected !== probe.cdnDetected && probe.cdnDetected) {
+              await env.DB.prepare('INSERT INTO alerts (account_id, alert_type, title, detail, severity, user_email) VALUES (?,?,?,?,?,?)')
+                .bind(a.id, 'cdn_change', 'CDN Change: ' + a.account_name, lastProbe.cdn_detected + ' → ' + probe.cdnDetected, 'high', email).run();
+            }
+            if (lastProbe.dns_provider !== dns.dnsProvider && dns.dnsProvider) {
+              await env.DB.prepare('INSERT INTO alerts (account_id, alert_type, title, detail, severity, user_email) VALUES (?,?,?,?,?,?)')
+                .bind(a.id, 'dns_change', 'DNS Change: ' + a.account_name, lastProbe.dns_provider + ' → ' + dns.dnsProvider, 'high', email).run();
+            }
+          }
+        } catch (_) {}
+      }
+
+      // Match threat intel to this user's accounts
+      try {
+        const threats = await fetchThreatIntelligence(1, undefined, env.THREAT_CACHE); // last 24h
+        for (const a of accounts.results as any[]) {
+          const matched = matchIncidentsToAccount(threats.incidents, a);
+          for (const inc of matched.slice(0, 2)) { // Max 2 alerts per account
+            await env.DB.prepare('INSERT INTO alerts (account_id, alert_type, title, detail, severity, user_email) VALUES (?,?,?,?,?,?)')
+              .bind(a.id, 'threat_match', 'Threat: ' + inc.title.slice(0, 80), 'Matched to ' + a.account_name + ' (' + (a.industry || '') + '). Score: ' + inc.score, inc.score > 80 ? 'critical' : 'high', email).run();
+          }
+        }
+      } catch (_) {}
+    }
+  },
+};
+
+export default worker;

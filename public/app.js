@@ -589,11 +589,71 @@ function renderGlobalThreats(c) {
         rh += '</div>';
         if (inc.summary) rh += '<p style="font-size:12px;color:var(--text-tertiary);margin-top:6px;line-height:1.5">' + inc.summary.slice(0, 150) + '</p>';
         if (prods.length) { rh += '<div style="display:flex;flex-wrap:wrap;gap:3px;margin-top:6px">'; for (var j=0;j<prods.length;j++) rh += '<span class="stack-chip is-cf" style="font-size:10px;padding:2px 6px">' + prods[j] + '</span>'; rh += '</div>'; }
+        rh += '<div style="display:flex;gap:6px;margin-top:8px"><button class="btn btn-primary btn-sm global-threat-email" data-idx="' + i + '">' + IC.send + ' Draft Email</button><a href="' + inc.url + '" target="_blank" class="btn btn-ghost btn-sm" style="font-size:11px">' + IC.globe + ' Read</a></div>';
         rh += '</div>';
-        rh += '<a href="' + inc.url + '" target="_blank" class="btn btn-ghost btn-sm" style="flex-shrink:0;font-size:11px">' + IC.globe + ' Read</a>';
         rh += '</div></div>';
       }
+      rh += '<div id="global-threat-email-out" style="margin-top:24px"></div>';
       results.innerHTML = rh;
+
+      // Email gen from global threats (asks for account)
+      var globalEmailBtns = results.querySelectorAll('.global-threat-email');
+      for (var bi = 0; bi < globalEmailBtns.length; bi++) {
+        (function(btn, idx) {
+          btn.addEventListener('click', function() {
+            var out = document.getElementById('global-threat-email-out');
+            // Prompt for account search
+            out.innerHTML = '<div class="d-card" style="padding:20px">'
+              + '<div style="font-size:13px;font-weight:700;color:var(--text-primary);margin-bottom:12px">Generate incident-triggered email for which account?</div>'
+              + '<div class="search-wrap" style="margin-bottom:12px">' + IC.search + '<input type="text" class="search-input" id="threat-acct-search" placeholder="Search for an account..." /></div>'
+              + '<div id="threat-acct-results"></div>'
+              + '</div>';
+            out.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+            var searchTimer;
+            document.getElementById('threat-acct-search').addEventListener('input', function(e) {
+              clearTimeout(searchTimer);
+              var q = e.target.value;
+              searchTimer = setTimeout(function() {
+                if (q.length < 2) { document.getElementById('threat-acct-results').innerHTML = ''; return; }
+                api.get('/accounts?search=' + encodeURIComponent(q) + '&limit=10').then(function(d) {
+                  var rhtml = '';
+                  for (var ai = 0; ai < d.accounts.length; ai++) {
+                    var acc = d.accounts[ai];
+                    rhtml += '<div class="threat-acct-pick" data-id="' + acc.id + '" style="padding:8px 12px;border-bottom:1px solid var(--border-glass);cursor:pointer;font-size:13px;display:flex;justify-content:space-between">'
+                      + '<span><strong style="color:var(--text-primary)">' + acc.account_name + '</strong> <span style="color:var(--text-muted);font-size:11px">' + (acc.industry || '') + '</span></span>'
+                      + '<span class="btn btn-primary btn-sm" style="padding:3px 8px;font-size:11px">' + IC.send + ' Generate</span></div>';
+                  }
+                  document.getElementById('threat-acct-results').innerHTML = rhtml || '<div style="padding:8px;color:var(--text-muted);font-size:12px">No accounts found</div>';
+
+                  var picks = document.querySelectorAll('.threat-acct-pick');
+                  for (var pi = 0; pi < picks.length; pi++) {
+                    (function(pick) {
+                      pick.addEventListener('click', function() {
+                        var accountId = pick.getAttribute('data-id');
+                        out.innerHTML = '<div style="padding:32px;text-align:center"><div class="spinner" style="margin:0 auto 12px"></div><div style="color:var(--text-muted);font-size:13px">Generating incident-triggered email...</div></div>';
+                        api.post('/threats/' + accountId + '/email', { incidentIndex: idx, persona: 'bdr' }).then(function(r) {
+                          var emailBody = (r.content || '').replace(/^Subject:.*\n*/im, '');
+                          var subjectM = (r.content || '').match(/Subject:?\s*(.+?)(?:\n|$)/i);
+                          var subject = subjectM ? subjectM[1].trim() : 'Security Alert';
+                          out.innerHTML = '<div class="email-preview slide-up">'
+                            + '<div class="email-toolbar"><div class="email-dot r"></div><div class="email-dot y"></div><div class="email-dot g"></div><span style="margin-left:auto;font-size:11px;color:var(--text-muted);font-weight:600">Incident-Triggered / BDR</span></div>'
+                            + '<div class="email-subject-bar"><div style="display:flex;align-items:center;gap:8px;margin-bottom:8px"><span style="font-size:20px">' + IC.alert + '</span><div><div style="font-size:11px;color:var(--red);font-weight:600">' + (r.incident?.title || '').slice(0, 60) + '</div><div style="font-size:10px;color:var(--text-muted)">Score: ' + (r.incident?.score || 0) + '</div></div></div>'
+                            + '<div class="email-subject-label">Subject</div><div class="email-subject">' + subject + '</div></div>'
+                            + '<div class="email-body">' + md(emailBody) + '</div>'
+                            + '<div class="email-actions"><button class="btn btn-primary btn-sm" onclick="copyEl(this,\'email\')">' + IC.copy + ' Copy Email</button></div></div>';
+                        }).catch(function(err) {
+                          out.innerHTML = '<div style="padding:24px;color:var(--red);text-align:center">' + err.message + '</div>';
+                        });
+                      });
+                    })(picks[pi]);
+                  }
+                });
+              }, 300);
+            });
+          });
+        })(globalEmailBtns[bi], i);
+      }
     }).catch(function(err) {
       results.innerHTML = '<div style="padding:32px;color:var(--red);text-align:center">' + err.message + '</div>';
     });

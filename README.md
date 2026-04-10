@@ -6,7 +6,7 @@
 3. [Cloudflare Services Used](#3-cloudflare-services-used)
 4. [Environment Variables & Secrets](#4-environment-variables--secrets)
 5. [Database Schema](#5-database-schema)
-6. [Authentication System](#6-authentication-system)
+6. [Authentication & Security](#6-authentication--security)
 7. [API Endpoints Reference](#7-api-endpoints-reference)
 8. [Frontend Pages & Views](#8-frontend-pages--views)
 9. [AI Models & Usage](#9-ai-models--usage)
@@ -17,12 +17,13 @@
 14. [Threat Intelligence Pipeline](#14-threat-intelligence-pipeline)
 15. [Advanced Features (15)](#15-advanced-features)
 16. [Opportunity Agent](#16-opportunity-agent)
-17. [Gmail Integration](#17-gmail-integration)
-18. [Salesforce Integration](#18-salesforce-integration)
-19. [Sharing System](#19-sharing-system)
-20. [Encrypted Settings](#20-encrypted-settings)
-21. [Deployment Instructions](#21-deployment-instructions)
-22. [File Structure](#22-file-structure)
+17. [Usage Analytics](#17-usage-analytics)
+18. [Gmail Integration](#18-gmail-integration)
+19. [Salesforce Integration](#19-salesforce-integration)
+20. [Sharing System](#20-sharing-system)
+21. [Encrypted Settings](#21-encrypted-settings)
+22. [Deployment Instructions](#22-deployment-instructions)
+23. [File Structure](#23-file-structure)
 
 ---
 
@@ -39,11 +40,12 @@
 - **Auto-generate pipeline opportunities** via a daisy-chained AI agent (DeepSeek R1 + Llama 3.3 70B) that analyzes accounts and creates deals with estimated ACV
 - **Calculate ROI**, find lookalike accounts, generate meeting prep, build multi-touch sequences, detect infrastructure changes, run A/B email tests, and convert voice notes to follow-up emails
 - **Track lead scores**, alerts, team activity, playbooks, and semantic search across all generated intel
+- **Monitor usage analytics** with page/tab visit tracking, daily trends, per-user activity, and tab popularity rankings
 - **Send emails directly via Gmail** through OAuth integration
 - **Sync with Salesforce** via OAuth to push activities and pull opportunities
 - **Share account intelligence** via tokenized public links that bypass Cloudflare Access
 
-The entire application is a **single Cloudflare Worker** (~3,500 lines of TypeScript) with a **vanilla JavaScript SPA** frontend (~2,800 lines). No React, no build step for the frontend, no external backend.
+The entire application is a **single Cloudflare Worker** (~3,700 lines of TypeScript) with a **vanilla JavaScript SPA** frontend (~3,000 lines). No React, no build step for the frontend, no external backend.
 
 **Live URL**: https://revflare.arunpotta1024.workers.dev
 **GitHub**: https://github.com/pottaarun/RevFlare
@@ -84,7 +86,8 @@ The entire application is a **single Cloudflare Worker** (~3,500 lines of TypeSc
 │  │  campaigns, campaign_emails, share_tokens, gmail_tokens,   │ │
 │  │  app_settings, opportunities, lead_scores, sequences,      │ │
 │  │  meeting_preps, alerts, probe_history, playbooks,          │ │
-│  │  voice_notes, vectorize_cache, salesforce_tokens           │ │
+│  │  voice_notes, vectorize_cache, salesforce_tokens,          │ │
+│  │  page_views                                                │ │
 │  └───────────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -106,7 +109,7 @@ The entire application is a **single Cloudflare Worker** (~3,500 lines of TypeSc
 | Service | Binding | Purpose |
 |---------|---------|---------|
 | **Workers** | (runtime) | Application server |
-| **D1** | `DB` | SQLite database (17+ tables) |
+| **D1** | `DB` | SQLite database (18 tables) |
 | **Workers AI** | `AI` | LLM inference (3 models) |
 | **Browser Rendering** | `BROWSER` | Headless Chromium via @cloudflare/puppeteer |
 | **Workers KV** | `THREAT_CACHE` | Threat intel cache + URL dedup |
@@ -148,7 +151,7 @@ Worker secrets always take priority over D1 settings.
 | `persona_messages` | Generated emails | account_id, persona, message_type, subject, content, user_email |
 | `campaigns` | Mass email campaigns | name, theme, persona, accountIds (JSON), status, generated count |
 | `campaign_emails` | Individual campaign emails | campaign_id, account_id, subject, content, status |
-| `share_tokens` | Public share links | token (16-char), account_id, created_by, expires_at |
+| `share_tokens` | Public share links | token (32-char UUID), account_id, created_by, expires_at (30-day default) |
 | `gmail_tokens` | OAuth tokens | user_email (PK), access_token, refresh_token, gmail_address |
 | `salesforce_tokens` | SF OAuth tokens | user_email (PK), instance_url, access_token, refresh_token |
 | `app_settings` | Encrypted config | key (PK), value (AES-256-GCM encrypted) |
@@ -161,17 +164,35 @@ Worker secrets always take priority over D1 settings.
 | `playbooks` | Reusable sales templates | name, persona, industry, template, usage_count |
 | `voice_notes` | Call note transcripts | account_id, transcript, generated_email, user_email |
 | `vectorize_cache` | Search index | content_type, content_id, content_text, account_id |
+| `page_views` | Usage analytics | page, tab, account_id, user_email, created_at |
 
 All data is **user-scoped** via `user_email` column.
 
 ---
 
-## 6. Authentication System
+## 6. Authentication & Security
 
+### Authentication
 1. **Cloudflare Access** injects JWT headers on every request
 2. Worker middleware extracts email from `Cf-Access-Jwt-Assertion` or `Cf-Access-Authenticated-User-Email`
-3. All queries include `WHERE user_email = ?`
-4. Public share endpoints (`/api/public/*`) bypass auth
+3. `_user` query parameter fallback is restricted to local dev only (blocked when `Cf-Connecting-Ip` or `Cf-Ray` headers present)
+4. Unauthenticated production requests return 401
+5. All queries include `WHERE user_email = ?`
+6. Public share endpoints (`/api/public/*`) bypass auth
+
+### Security Measures (27 vulnerabilities audited and remediated)
+
+| Protection | Implementation |
+|-----------|----------------|
+| **Auth bypass prevention** | `_user` param blocked in production via Cloudflare header detection |
+| **XSS protection** | Global `esc()` HTML entity escaping; `md()` function escapes before markdown transforms |
+| **SSRF prevention** | `isValidExternalDomain()` blocks IPs, localhost, private ranges, link-local, internal TLDs on all fetch/Puppeteer calls |
+| **SOQL injection** | Full character escaping (`\`, `'`, `%`, `_`) on all Salesforce SOQL queries |
+| **CORS lockdown** | Origin-restricted; allows `.workers.dev`, `localhost` only (no wildcard) |
+| **Share token hardening** | Full UUID (128-bit entropy) with mandatory 30-day expiry |
+| **Input validation** | `limit` capped at 200, `page` floored at 1, `days` capped at 90 |
+| **Authorization checks** | Campaign send verifies ownership; meeting prep/win-loss sub-queries include `user_email` |
+| **AES-256-GCM** | Encrypted credential storage for OAuth secrets and API keys |
 
 ---
 
@@ -254,6 +275,12 @@ All data is **user-scoped** via `user_email` column.
 | `POST` | `/api/opportunities/auto-generate` | AI agent: auto-create opportunities |
 | `GET` | `/api/acv` | ACV breakdown by stage/country |
 
+### Usage Analytics
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/track` | Log page/tab visit (fire-and-forget) |
+| `GET` | `/api/analytics` | Aggregated analytics: by page, tab, user, day |
+
 ### Semantic Search
 | Method | Path | Description |
 |--------|------|-------------|
@@ -293,7 +320,7 @@ All data is **user-scoped** via `user_email` column.
 
 ### Navigation
 ```
-Dashboard  Threats  Campaigns  |  Pipeline  Leads  Alerts  |  Team  Playbooks  Upload    [Search]
+Dashboard  Threats  Campaigns  |  Pipeline  Leads  Alerts  |  Team  Playbooks  Upload  |  Analytics    [Search]
 ```
 
 ### Routes
@@ -311,6 +338,7 @@ Dashboard  Threats  Campaigns  |  Pipeline  Leads  Alerts  |  Team  Playbooks  U
 | `#/playbooks` | Playbook CRUD with usage tracking |
 | `#/upload` | Excel upload with drag-and-drop |
 | `#/search/:query` | Semantic search results across all intel |
+| `#/analytics` | Usage analytics: page views, tab popularity, daily trends, per-user activity |
 | `#/account/:id` | Account detail with 7 tabs (see below) |
 | `#/share/:token` | Public share view (no auth required) |
 
@@ -469,13 +497,46 @@ AI-powered pipeline generation using a daisy-chained two-model architecture:
 
 ---
 
-## 17. Gmail Integration
+## 17. Usage Analytics
+
+Built-in page and tab visit tracking to understand how your team uses RevFlare.
+
+### How it works
+- Every page navigation and account detail tab click fires a `POST /api/track`
+- Uses `c.executionCtx.waitUntil()` for fire-and-forget DB writes -- zero impact on page load
+- Data stored in `page_views` table with indexed `user_email`, `page`, and `created_at`
+
+### Analytics Dashboard (`#/analytics`)
+
+| Section | Description |
+|---------|-------------|
+| **Top stats** | Total views, most visited page, most popular tab |
+| **Page views table** | Every page ranked by views with percentage bars |
+| **Tab views table** | Account detail tabs ranked by popularity (color-coded per tab) |
+| **Daily trend** | Bar chart of views per day (last 30 days) |
+| **User activity** | Views per user, ranked |
+| **Recent activity** | Last 50 page views with timestamps |
+
+### What gets tracked
+
+| Event | `page` value | `tab` value |
+|-------|-------------|-------------|
+| Navigate to Dashboard | `dashboard` | — |
+| Navigate to Pipeline | `pipeline` | — |
+| Navigate to Leads | `lead-scores` | — |
+| Navigate to Alerts | `alerts` | — |
+| Navigate to any page | route name | — |
+| Click account tab | `account` | `overview`, `research`, `threats`, `competitive`, `messaging`, `advanced`, `history` |
+
+---
+
+## 18. Gmail Integration
 
 OAuth flow via Google Cloud Console credentials. Stored encrypted in D1 or as Worker secrets. Sends via Gmail API (`gmail.send` scope only). Auto-refreshes tokens. In-app wizard with no CLI needed.
 
 ---
 
-## 18. Salesforce Integration
+## 19. Salesforce Integration
 
 OAuth flow to Salesforce. Supports:
 - **Push activities**: Send research reports and generated emails as SF Tasks
@@ -484,54 +545,56 @@ OAuth flow to Salesforce. Supports:
 
 ---
 
-## 19. Sharing System
+## 20. Sharing System
 
-16-char tokenized links. Public endpoints bypass Access. Shows account data + all research + all messages. Tokens deletable, optional expiry.
+32-char UUID tokenized links (128-bit entropy) with mandatory 30-day expiry. Public endpoints bypass Access. Shows account data + all research + all messages. Tokens deletable.
 
 ---
 
-## 20. Encrypted Settings
+## 21. Encrypted Settings
 
 AES-256-GCM via Web Crypto API. Key derived from SHA-256 of `revflare-settings-v1:{keyName}`. Random 12-byte IV per encryption. Only the running Worker can decrypt.
 
 ---
 
-## 21. Deployment
+## 22. Deployment
 
 ```bash
 git clone https://github.com/pottaarun/RevFlare.git
 cd RevFlare
 npm install
-wrangler d1 create revflare-db          # Create database
-wrangler d1 execute revflare-db --remote --file=schema.sql
-wrangler d1 execute revflare-db --remote --file=migration-auth.sql
-wrangler deploy                          # Deploy to Cloudflare
+wrangler d1 create revflare-db                              # Create database
+wrangler d1 execute revflare-db --remote --file=schema-full.sql  # All 18 tables + indexes
+wrangler deploy                                              # Deploy to Cloudflare
 ```
 
 Configure Cloudflare Access on `revflare.*.workers.dev` for auth.
 
 ---
 
-## 22. File Structure
+## 23. File Structure
 
 ```
 revFlare/
 ├── src/
-│   ├── index.ts              # Main Worker (~3,500 lines)
+│   ├── index.ts              # Main Worker (~3,700 lines)
 │   ├── advanced-features.ts  # Lead scoring, ROI, lookalikes, sequences, etc.
 │   └── threat-intel.ts       # Threat intelligence module (~465 lines)
 ├── public/
 │   ├── index.html            # HTML shell + nav + Gmail wizard
-│   ├── app.js                # Frontend SPA (~2,800 lines)
+│   ├── app.js                # Frontend SPA (~3,000 lines)
 │   └── styles.css            # Design system (~1,400 lines)
-├── schema.sql                # Core DB schema
-├── migration-auth.sql        # Auth migration
+├── screenshots/              # App screenshots (auto-generated)
+├── schema-full.sql           # Complete DB schema (18 tables + indexes)
+├── schema.sql                # Core DB schema (legacy)
 ├── seed.mjs                  # Excel seed script
+├── build_final_pptx.py       # Presentation builder (mock server + Playwright + python-pptx)
+├── RevFlare-Presentation.pptx  # 7-slide presentation with screenshots
 ├── wrangler.toml             # Worker config
 ├── package.json              # Dependencies
 ├── tsconfig.json             # TypeScript config
 └── README.md                 # This file
 ```
 
-**Total codebase**: ~8,600 lines across 9 source files.
+**Total codebase**: ~9,000 lines across 9 source files.
 **Dependencies**: hono, @cloudflare/puppeteer, @cloudflare/workers-types, typescript, wrangler, xlsx

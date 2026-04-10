@@ -2103,7 +2103,7 @@ async function decryptValue(stored: string, keyName: string): Promise<string> {
 // Save settings (encrypted)
 app.post('/api/settings', async (c) => {
   const { key, value } = await c.req.json<{ key: string; value: string }>();
-  const allowedKeys = ['google_client_id', 'google_client_secret', 'intricately_api_key'];
+  const allowedKeys = ['google_client_id', 'google_client_secret', 'intricately_api_key', 'news_api_key', 'gnews_api_key', 'mediastack_api_key'];
   if (!allowedKeys.includes(key)) return c.json({ error: 'Invalid setting' }, 400);
   const encrypted = await encryptValue(value, key);
   await c.env.DB.prepare(
@@ -2681,10 +2681,27 @@ app.get('/api/campaigns/:id/export', async (c) => {
 // THREAT INTELLIGENCE
 // ══════════════════════════════════════════════════════════════════
 
+// Helper to get API keys for paid news sources
+async function getNewsApiKeys(db: D1Database): Promise<{ newsApi: string; gNews: string; mediaStack: string }> {
+  const keys = { newsApi: '', gNews: '', mediaStack: '' };
+  try {
+    const [k1, k2, k3] = await Promise.all([
+      db.prepare("SELECT value FROM app_settings WHERE key = 'news_api_key'").first(),
+      db.prepare("SELECT value FROM app_settings WHERE key = 'gnews_api_key'").first(),
+      db.prepare("SELECT value FROM app_settings WHERE key = 'mediastack_api_key'").first(),
+    ]);
+    if ((k1 as any)?.value) keys.newsApi = await decryptValue((k1 as any).value, 'news_api_key');
+    if ((k2 as any)?.value) keys.gNews = await decryptValue((k2 as any).value, 'gnews_api_key');
+    if ((k3 as any)?.value) keys.mediaStack = await decryptValue((k3 as any).value, 'mediastack_api_key');
+  } catch {}
+  return keys;
+}
+
 // Global threat feed (all incidents, not account-specific)
 app.get('/api/threats', async (c) => {
   const days = parseInt(c.req.query('days') || '14');
-  const result = await fetchThreatIntelligence(days);
+  const apiKeys = await getNewsApiKeys(c.env.DB);
+  const result = await fetchThreatIntelligence(days, apiKeys);
   return c.json(result);
 });
 
@@ -2695,7 +2712,8 @@ app.get('/api/threats/:accountId', async (c) => {
     .bind(accountId, c.get('userEmail')).first();
   if (!account) return c.json({ error: 'Account not found' }, 404);
 
-  const result = await fetchThreatIntelligence(14);
+  const apiKeys = await getNewsApiKeys(c.env.DB);
+  const result = await fetchThreatIntelligence(14, apiKeys);
   const matched = matchIncidentsToAccount(result.incidents, account);
 
   return c.json({
@@ -2715,7 +2733,8 @@ app.post('/api/threats/:accountId/email', async (c) => {
     .bind(accountId, c.get('userEmail')).first();
   if (!account) return c.json({ error: 'Account not found' }, 404);
 
-  const result = await fetchThreatIntelligence(14);
+  const apiKeys2 = await getNewsApiKeys(c.env.DB);
+  const result = await fetchThreatIntelligence(14, apiKeys2);
   const matched = matchIncidentsToAccount(result.incidents, account);
 
   if (!matched.length) return c.json({ error: 'No relevant incidents found for this account' }, 404);
@@ -2751,6 +2770,43 @@ STRUCTURE:
 
   const content = await runAI(c.env.AI, EMAIL_MODEL, system, prompt);
   return c.json({ content, incident: { title: incident.title, score: incident.score, cfProducts: incident.cfProducts } });
+});
+
+// ══════════════════════════════════════════════════════════════════
+// OPPORTUNITY MANAGEMENT & ACV TRACKING
+// ══════════════════════════════════════════════════════════════════
+
+app.get('/api/opportunities', async (c) => {
+  const email = c.get('userEmail');
+  const opps = await c.env.DB.prepare('SELECT * FROM opportunities WHERE user_email = ? ORDER BY created_at DESC').bind(email).all();
+  return c.json(opps.results);
+});
+
+app.post('/api/opportunities', async (c) => {
+  const email = c.get('userEmail');
+  const { id, account_id, account_name, industry, country, acv, stage, notes } = await c.req.json<any>();
+  if (id) {
+    await c.env.DB.prepare('UPDATE opportunities SET account_name=?, industry=?, country=?, acv=?, stage=?, notes=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_email=?')
+      .bind(account_name, industry, country, acv||0, stage||'prospecting', notes||'', id, email).run();
+    return c.json({ success: true, id });
+  }
+  const r = await c.env.DB.prepare('INSERT INTO opportunities (account_id, account_name, industry, country, acv, stage, notes, user_email) VALUES (?,?,?,?,?,?,?,?)')
+    .bind(account_id||null, account_name||'', industry||'', country||'', acv||0, stage||'prospecting', notes||'', email).run();
+  return c.json({ success: true, id: r.meta.last_row_id });
+});
+
+app.delete('/api/opportunities/:id', async (c) => {
+  const email = c.get('userEmail');
+  await c.env.DB.prepare('DELETE FROM opportunities WHERE id = ? AND user_email = ?').bind(c.req.param('id'), email).run();
+  return c.json({ success: true });
+});
+
+app.get('/api/acv', async (c) => {
+  const email = c.get('userEmail');
+  const total = await c.env.DB.prepare('SELECT COALESCE(SUM(acv),0) as total FROM opportunities WHERE user_email = ?').bind(email).first() as any;
+  const byCountry = await c.env.DB.prepare('SELECT country, SUM(acv) as total FROM opportunities WHERE user_email = ? AND country != "" GROUP BY country ORDER BY total DESC').bind(email).all();
+  const byStage = await c.env.DB.prepare('SELECT stage, COUNT(*) as cnt, SUM(acv) as total FROM opportunities WHERE user_email = ? GROUP BY stage ORDER BY total DESC').bind(email).all();
+  return c.json({ totalAcv: total?.total || 0, byCountry: byCountry.results, byStage: byStage.results });
 });
 
 // ── Catalog endpoint: return full CF product catalog for browsing ───

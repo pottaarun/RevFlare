@@ -1264,29 +1264,73 @@ function renderCampaignDetail(c, id) {
     if (genBtn) {
       genBtn.addEventListener('click', function runBatch() {
         genBtn.disabled = true;
-        genBtn.innerHTML = '<div class="spinner" style="width:14px;height:14px;border-width:2px;display:inline-block;vertical-align:middle;margin-right:8px"></div> Generating batch...';
+        genBtn.style.display = 'none';
         var prog = document.getElementById('gen-progress');
+        var pctDone = cp.total_accounts > 0 ? Math.round((cp.generated / cp.total_accounts) * 100) : 0;
+        var remaining = cp.total_accounts - cp.generated;
+        var batchSize = Math.min(2, remaining);
+
+        prog.innerHTML = '<div class="d-card" style="border-color:var(--border-accent);overflow:hidden">'
+          // Header
+          + '<div style="display:flex;align-items:center;gap:14px;margin-bottom:20px">'
+          + '<div class="ai-pulse" style="width:40px;height:40px;flex-shrink:0">' + IC.sparkles + '</div>'
+          + '<div style="flex:1"><div style="font-size:15px;font-weight:700;color:var(--text-primary)">Generating ' + batchSize + ' hyper-personalized emails...</div>'
+          + '<div style="font-size:12px;color:var(--text-muted);margin-top:2px">Live research (website, news, SEC, Intricately) + AI generation per account</div></div>'
+          + '</div>'
+          // Progress bar
+          + '<div style="margin-bottom:16px">'
+          + '<div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-muted);margin-bottom:6px"><span>' + cp.generated + ' of ' + cp.total_accounts + ' emails</span><span>' + pctDone + '%</span></div>'
+          + '<div class="progress-bar" style="height:8px"><div class="progress-fill" id="batch-progress-fill" style="width:' + pctDone + '%;transition:width 1s ease"></div></div>'
+          + '</div>'
+          // Per-account status
+          + '<div id="batch-account-status" style="font-size:12px">'
+          + '<div style="display:flex;align-items:center;gap:8px;padding:6px 0;color:var(--text-muted)"><div class="spinner" style="width:12px;height:12px;border-width:1.5px;flex-shrink:0"></div><span>Fetching account data and running live probes...</span></div>'
+          + '</div>'
+          + '</div>';
+        prog.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+        // Animate the progress bar while waiting
+        var animInterval = setInterval(function() {
+          var fill = document.getElementById('batch-progress-fill');
+          if (fill) {
+            var current = parseFloat(fill.style.width);
+            var target = Math.min(current + 0.3, pctDone + (100 - pctDone) * 0.8);
+            fill.style.width = target + '%';
+          }
+        }, 500);
 
         api.post('/campaigns/' + id + '/generate', {}).then(function(result) {
-          if (prog) prog.innerHTML = '<div style="font-size:13px;color:var(--text-secondary)">' + result.generated + '/' + result.total + ' emails generated. ' + (result.hasMore ? 'More accounts pending.' : 'All done!') + '</div>';
-
-          if (result.hasMore) {
-            genBtn.disabled = false;
-            genBtn.innerHTML = IC.sparkles + ' Generate Next Batch (' + Math.min(2, result.total - result.generated) + ' emails)';
-          } else {
-            genBtn.innerHTML = '\u2713 Campaign Complete';
-            genBtn.classList.remove('btn-primary');
-            genBtn.classList.add('btn-ghost');
+          clearInterval(animInterval);
+          var statusEl = document.getElementById('batch-account-status');
+          if (statusEl && result.batch) {
+            var statusHtml = '';
+            for (var i = 0; i < result.batch.length; i++) {
+              var b = result.batch[i];
+              var icon = b.status === 'generated' ? '<span style="color:var(--green)">\u2713</span>' : '<span style="color:var(--red)">\u2717</span>';
+              statusHtml += '<div style="display:flex;align-items:center;gap:8px;padding:4px 0">' + icon + ' <span style="color:var(--text-primary);font-weight:600">' + b.accountName + '</span>';
+              if (b.subject) statusHtml += ' <span style="color:var(--text-muted)">&mdash; ' + b.subject.slice(0, 50) + '</span>';
+              if (b.error) statusHtml += ' <span style="color:var(--red)">' + b.error + '</span>';
+              statusHtml += '</div>';
+            }
+            statusEl.innerHTML = statusHtml;
           }
 
-          // Refresh to show new emails
-          if (result.batch && result.batch.length) {
-            setTimeout(function() { renderCampaignDetail(document.getElementById('main'), id); }, 500);
-          }
+          // Update progress bar to actual
+          var newPct = result.total > 0 ? Math.round((result.generated / result.total) * 100) : 100;
+          var fill = document.getElementById('batch-progress-fill');
+          if (fill) fill.style.width = newPct + '%';
+
+          // Wait a moment to show results, then refresh
+          setTimeout(function() {
+            renderCampaignDetail(document.getElementById('main'), id);
+          }, 2000);
         }).catch(function(err) {
-          if (prog) prog.innerHTML = '<div style="color:var(--red);font-size:13px">Error: ' + err.message + '</div>';
-          genBtn.disabled = false;
-          genBtn.innerHTML = IC.sparkles + ' Retry Batch';
+          clearInterval(animInterval);
+          prog.innerHTML = '<div class="d-card" style="border-color:rgba(248,113,113,0.3);text-align:center;padding:24px">'
+            + '<div style="color:var(--red);font-size:15px;font-weight:700;margin-bottom:8px">Generation failed</div>'
+            + '<div style="color:var(--text-muted);font-size:13px;margin-bottom:16px">' + (err.message || err) + '</div>'
+            + '<button class="btn btn-primary" onclick="renderCampaignDetail(document.getElementById(\'main\'),\'' + id + '\')">' + IC.sparkles + ' Retry</button>'
+            + '</div>';
         });
       });
     }

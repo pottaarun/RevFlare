@@ -55,9 +55,24 @@ app.use('/api/*', async (c, next) => {
 // ── Get current user endpoint ──────────────────────────────────────
 app.get('/api/me', async (c) => {
   const email = c.get('userEmail');
-  // Also return account count so frontend can verify data access
   const count = await c.env.DB.prepare('SELECT COUNT(*) as cnt FROM accounts WHERE user_email = ?').bind(email).first();
   return c.json({ email, accountCount: (count as any)?.cnt || 0 });
+});
+
+// ── Global platform stats (all users combined) ────────────────────
+app.get('/api/platform-stats', async (c) => {
+  const [emails, research, campaigns, users] = await Promise.all([
+    c.env.DB.prepare('SELECT COUNT(*) as cnt FROM persona_messages').first(),
+    c.env.DB.prepare('SELECT COUNT(*) as cnt FROM research_reports').first(),
+    c.env.DB.prepare('SELECT COUNT(*) as cnt FROM campaigns').first(),
+    c.env.DB.prepare('SELECT COUNT(DISTINCT user_email) as cnt FROM accounts WHERE user_email != ""').first(),
+  ]);
+  return c.json({
+    totalEmails: (emails as any)?.cnt || 0,
+    totalResearch: (research as any)?.cnt || 0,
+    totalCampaigns: (campaigns as any)?.cnt || 0,
+    totalUsers: (users as any)?.cnt || 0,
+  });
 });
 
 // ── Column Mapping (Excel Header -> DB Column) ────────────────────

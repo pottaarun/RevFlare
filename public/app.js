@@ -88,17 +88,56 @@ window.addEventListener('hashchange',navigate);
 window.addEventListener('DOMContentLoaded', function() {
   navigate();
   // Check Gmail connection status and show in nav
+  // Always show the button first, then upgrade if connected
+  var navRight = document.querySelector('.nav-right');
+  if (navRight) {
+    navRight.insertAdjacentHTML('afterbegin', '<button class="btn btn-ghost btn-sm" style="font-size:11px;padding:4px 10px" id="gmail-setup-btn">' + IC.mail + ' Connect Gmail</button>');
+    document.getElementById('gmail-setup-btn').addEventListener('click', function() { showGmailSetupWizard(); });
+  }
   api.get('/gmail/status').then(function(g) {
     window._gmailConnected = g.connected;
     window._gmailAddress = g.gmailAddress || '';
-    var navRight = document.querySelector('.nav-right');
-    if (navRight) {
-      if (g.connected) {
-        navRight.insertAdjacentHTML('afterbegin', '<span style="font-size:11px;color:var(--green);font-weight:600;padding:4px 10px;background:var(--green-bg);border:1px solid rgba(52,211,153,0.2);border-radius:var(--radius-pill);cursor:default" title="Connected: ' + g.gmailAddress + '">' + IC.mail + ' Gmail: ' + g.gmailAddress.split('@')[0] + '</span>');
-      } else {
-        navRight.insertAdjacentHTML('afterbegin', '<button class="btn btn-ghost btn-sm" style="font-size:11px;padding:4px 10px" id="gmail-setup-btn">' + IC.mail + ' Connect Gmail</button>');
-        document.getElementById('gmail-setup-btn').addEventListener('click', function() { showGmailSetupWizard(); });
-      }
+    if (navRight && g.connected) {
+      var btn = document.getElementById('gmail-setup-btn');
+      if (btn) btn.outerHTML = '<span style="font-size:11px;color:var(--green);font-weight:600;padding:4px 10px;background:var(--green-bg);border:1px solid rgba(52,211,153,0.2);border-radius:var(--radius-pill);cursor:default" title="Connected: ' + g.gmailAddress + '">' + IC.mail + ' Gmail: ' + g.gmailAddress.split('@')[0] + '</span>';
+    }
+  }).catch(function() {
+    // API failed (Access redirect, etc.) - button already shown, wizard handles it
+    window._gmailConnected = false;
+  });
+
+  // Fetch platform-wide stats for bottom bar
+  api.get('/platform-stats').then(function(ps) {
+    var bar = document.getElementById('platform-bar');
+    if (bar) {
+      var items = [
+        { label: 'Emails Generated', value: ps.totalEmails, color: '#34d399', icon: '\u{1F4E7}' },
+        { label: 'Research Reports', value: ps.totalResearch, color: '#60a5fa', icon: '\u{1F50D}' },
+        { label: 'Campaigns', value: ps.totalCampaigns, color: '#a78bfa', icon: '\u{1F3AF}' },
+        { label: 'Active Users', value: ps.totalUsers, color: '#fbbf24', icon: '\u{1F465}' },
+      ];
+      bar.innerHTML = items.map(function(item) {
+        return '<div style="display:flex;align-items:center;gap:6px">'
+          + '<span style="font-size:13px">' + item.icon + '</span>'
+          + '<span class="platform-counter" style="color:' + item.color + ';font-size:14px;font-variant-numeric:tabular-nums" data-target="' + item.value + '">0</span>'
+          + '<span style="color:var(--text-muted)">' + item.label + '</span>'
+          + '</div>';
+      }).join('<span style="color:rgba(255,255,255,0.08)">|</span>');
+
+      // Animate counters
+      bar.querySelectorAll('.platform-counter').forEach(function(el) {
+        var target = parseInt(el.getAttribute('data-target')) || 0;
+        var duration = 1500;
+        var start = performance.now();
+        function tick(now) {
+          var elapsed = now - start;
+          var progress = Math.min(elapsed / duration, 1);
+          var eased = 1 - Math.pow(1 - progress, 3);
+          el.textContent = Math.round(target * eased).toLocaleString();
+          if (progress < 1) requestAnimationFrame(tick);
+        }
+        requestAnimationFrame(tick);
+      });
     }
   }).catch(function() {});
 

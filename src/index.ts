@@ -2048,34 +2048,70 @@ app.post('/api/public/:token/research', async (c) => {
 
 const GMAIL_SCOPES = 'https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/userinfo.email';
 
-// Helper: get Google OAuth creds from D1 settings (fallback to env secrets)
+// Helper: get Google OAuth creds - Worker secrets first, then encrypted D1
 async function getGoogleCreds(db: D1Database, env: Bindings): Promise<{ clientId: string; clientSecret: string }> {
+  // Worker secrets take priority (most secure)
   let clientId = env.GOOGLE_CLIENT_ID || '';
   let clientSecret = env.GOOGLE_CLIENT_SECRET || '';
+
+  // Fallback to encrypted D1 settings
   if (!clientId) {
     const row = await db.prepare("SELECT value FROM app_settings WHERE key = 'google_client_id'").first() as any;
-    if (row) clientId = row.value;
+    if (row?.value) clientId = await decryptValue(row.value, 'google_client_id');
   }
   if (!clientSecret) {
     const row = await db.prepare("SELECT value FROM app_settings WHERE key = 'google_client_secret'").first() as any;
-    if (row) clientSecret = row.value;
+    if (row?.value) clientSecret = await decryptValue(row.value, 'google_client_secret');
   }
   return { clientId, clientSecret };
 }
 
-// Save settings API
+// ── Encrypted settings (AES-GCM) ───────────────────────────────────
+const ENC_SALT = 'revflare-settings-v1'; // Combined with key name for unique derivation
+
+async function deriveKey(keyName: string): Promise<CryptoKey> {
+  const raw = new TextEncoder().encode(ENC_SALT + ':' + keyName);
+  const hash = await crypto.subtle.digest('SHA-256', raw);
+  return crypto.subtle.importKey('raw', hash, 'AES-GCM', false, ['encrypt', 'decrypt']);
+}
+
+async function encryptValue(value: string, keyName: string): Promise<string> {
+  const key = await deriveKey(keyName);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const encrypted = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(value));
+  // Store as: base64(iv):base64(ciphertext)
+  const ivB64 = btoa(String.fromCharCode(...iv));
+  const ctB64 = btoa(String.fromCharCode(...new Uint8Array(encrypted)));
+  return ivB64 + ':' + ctB64;
+}
+
+async function decryptValue(stored: string, keyName: string): Promise<string> {
+  try {
+    const [ivB64, ctB64] = stored.split(':');
+    if (!ivB64 || !ctB64) return ''; // Not encrypted (legacy plaintext) - return empty to force re-save
+    const iv = Uint8Array.from(atob(ivB64), c => c.charCodeAt(0));
+    const ct = Uint8Array.from(atob(ctB64), c => c.charCodeAt(0));
+    const key = await deriveKey(keyName);
+    const decrypted = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ct);
+    return new TextDecoder().decode(decrypted);
+  } catch (_) {
+    return ''; // Decryption failed
+  }
+}
+
+// Save settings (encrypted)
 app.post('/api/settings', async (c) => {
-  const email = c.get('userEmail');
   const { key, value } = await c.req.json<{ key: string; value: string }>();
   const allowedKeys = ['google_client_id', 'google_client_secret', 'intricately_api_key'];
   if (!allowedKeys.includes(key)) return c.json({ error: 'Invalid setting' }, 400);
+  const encrypted = await encryptValue(value, key);
   await c.env.DB.prepare(
     'INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP'
-  ).bind(key, value).run();
+  ).bind(key, encrypted).run();
   return c.json({ success: true });
 });
 
-// Get settings status (don't expose values, just whether they're set)
+// Get settings status (never exposes values)
 app.get('/api/settings/status', async (c) => {
   const keys = ['google_client_id', 'google_client_secret', 'intricately_api_key'];
   const result: Record<string, boolean> = {};
@@ -2083,7 +2119,6 @@ app.get('/api/settings/status', async (c) => {
     const row = await c.env.DB.prepare("SELECT value FROM app_settings WHERE key = ?").bind(key).first() as any;
     result[key] = !!(row?.value);
   }
-  // Also check env secrets
   if (c.env.GOOGLE_CLIENT_ID) result.google_client_id = true;
   if (c.env.GOOGLE_CLIENT_SECRET) result.google_client_secret = true;
   if (c.env.INTRICATELY_API_KEY) result.intricately_api_key = true;

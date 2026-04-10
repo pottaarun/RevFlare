@@ -57,28 +57,16 @@
               + '<div id="wiz-uri" style="background:#08090a;padding:10px;border-radius:6px;margin-top:6px;font-family:monospace;font-size:12px;color:#7c7fff;cursor:pointer;border:1px solid rgba(255,255,255,0.06)">' + redirectUri + ' <span style="opacity:0.4;margin-left:8px">click to copy</span></div>'
               + '</div>'
 
-              // Step 2: Two options
+              // Step 2: Paste credentials (encrypted in D1)
               + '<div style="margin-bottom:16px;padding:14px;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.06);border-radius:8px">'
-              + '<div style="color:#34d399;font-weight:700;font-size:12px;margin-bottom:10px">2. STORE YOUR CREDENTIALS</div>'
-              + '<div style="font-size:12px;color:#8a8f98;margin-bottom:12px">Choose how to store your Google OAuth credentials:</div>'
-
-              // Option A: Quick setup (in-app)
-              + '<div style="margin-bottom:12px;padding:12px;background:rgba(52,211,153,0.05);border:1px solid rgba(52,211,153,0.12);border-radius:8px">'
-              + '<div style="display:flex;align-items:center;gap:6px;margin-bottom:8px"><span style="color:#34d399;font-weight:700;font-size:12px">OPTION A: Quick Setup</span><span style="font-size:10px;padding:2px 6px;background:rgba(251,191,36,0.1);color:#fbbf24;border-radius:4px;font-weight:600">Stored in database</span></div>'
-              + '<label style="font-size:11px;color:#8a8f98;font-weight:600">Client ID</label>'
+              + '<div style="display:flex;align-items:center;gap:6px;margin-bottom:10px"><span style="color:#34d399;font-weight:700;font-size:12px">2. PASTE YOUR CREDENTIALS</span><span style="font-size:10px;padding:2px 6px;background:rgba(52,211,153,0.1);color:#34d399;border-radius:4px;font-weight:600">AES-256 encrypted</span></div>'
+              + '<div style="font-size:12px;color:#8a8f98;margin-bottom:10px">Credentials are encrypted with AES-256-GCM before storage. Only this Worker can decrypt them.</div>'
+              + '<label style="font-size:11px;color:#8a8f98;font-weight:600">Google Client ID</label>'
               + '<input type="text" id="wiz-client-id" placeholder="xxxxxxxxxx.apps.googleusercontent.com" style="' + inputStyle + '" />'
-              + '<label style="font-size:11px;color:#8a8f98;font-weight:600;margin-top:8px;display:block">Client Secret</label>'
+              + '<label style="font-size:11px;color:#8a8f98;font-weight:600;margin-top:10px;display:block">Google Client Secret</label>'
               + '<input type="password" id="wiz-client-secret" placeholder="GOCSPX-xxxxxxxxxx" style="' + inputStyle + '" />'
               + '<div id="wiz-save-status" style="margin-top:8px;font-size:11px"></div>'
-              + '<button id="wiz-save-btn" style="width:100%;margin-top:10px;padding:9px;background:linear-gradient(135deg,#34d399,#10b981);color:#fff;border:none;border-radius:6px;font-weight:700;font-size:12px;cursor:pointer">Save Credentials</button>'
-              + '</div>'
-
-              // Option B: Secure (admin CLI)
-              + '<div style="padding:12px;background:rgba(96,165,250,0.05);border:1px solid rgba(96,165,250,0.12);border-radius:8px">'
-              + '<div style="display:flex;align-items:center;gap:6px;margin-bottom:8px"><span style="color:#60a5fa;font-weight:700;font-size:12px">OPTION B: Secure Setup</span><span style="font-size:10px;padding:2px 6px;background:rgba(52,211,153,0.1);color:#34d399;border-radius:4px;font-weight:600">Encrypted secrets</span></div>'
-              + '<div style="font-size:12px;color:#8a8f98;margin-bottom:6px">Ask your admin to run in terminal (credentials are encrypted, never stored in DB):</div>'
-              + '<div style="background:#08090a;padding:8px 10px;border-radius:6px;font-family:monospace;font-size:11px;color:#f7f8f8;line-height:1.9;border:1px solid rgba(255,255,255,0.06)">npx wrangler secret put GOOGLE_CLIENT_ID<br>npx wrangler secret put GOOGLE_CLIENT_SECRET</div>'
-              + '</div>'
+              + '<button id="wiz-save-btn" style="width:100%;margin-top:12px;padding:10px;background:linear-gradient(135deg,#34d399,#10b981);color:#fff;border:none;border-radius:8px;font-weight:700;font-size:13px;cursor:pointer">Save Credentials Securely</button>'
               + '</div>'
 
               // Step 3: Authorize

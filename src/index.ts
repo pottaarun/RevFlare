@@ -1143,20 +1143,45 @@ function formatLiveResearch(lr: LiveResearchResult): string {
 }
 
 // ── AI: Research Engine ────────────────────────────────────────────
-const RESEARCH_MODEL = '@cf/deepseek/deepseek-r1-distill-qwen-32b'; // Deeper reasoning for research
-const EMAIL_MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast';     // Fast for email generation
+const RESEARCH_MODEL = '@cf/deepseek-ai/deepseek-r1-distill-qwen-32b'; // Fixed model ID
+const EMAIL_MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
 const FAST_MODEL = '@cf/meta/llama-3.1-8b-instruct';
 
 async function runAI(ai: Ai, model: string, system: string, user: string): Promise<string> {
-  const response = await ai.run(model as any, {
-    messages: [
-      { role: 'system', content: system },
-      { role: 'user', content: user },
-    ],
-    max_tokens: 4096,
-    temperature: 0.7,
-  });
-  return (response as any).response || '';
+  // Trim context if too long (DeepSeek R1 has smaller context than Llama)
+  const maxCtx = model.includes('deepseek') ? 12000 : 20000;
+  if (user.length > maxCtx) user = user.slice(0, maxCtx) + '\n\n[Context trimmed for length]';
+
+  try {
+    const response = await ai.run(model as any, {
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: user },
+      ],
+      max_tokens: 4096,
+      temperature: 0.7,
+    });
+    const result = (response as any).response || '';
+    if (result) return result;
+    throw new Error('Empty response from ' + model);
+  } catch (e: any) {
+    // Fallback to Llama 3.3 if primary model fails
+    if (model !== EMAIL_MODEL) {
+      console.log(`Model ${model} failed: ${e.message}. Falling back to ${EMAIL_MODEL}`);
+      try {
+        const fallback = await ai.run(EMAIL_MODEL as any, {
+          messages: [
+            { role: 'system', content: system },
+            { role: 'user', content: user.slice(0, 20000) },
+          ],
+          max_tokens: 4096,
+          temperature: 0.7,
+        });
+        return (fallback as any).response || '';
+      } catch (_) {}
+    }
+    throw e;
+  }
 }
 
 function buildAccountContext(account: any): string {

@@ -97,28 +97,27 @@ window.addEventListener('DOMContentLoaded', function() {
     }
   }).catch(function() { window._gmailConnected = false; });
 
-  // Fetch platform-wide stats for bottom bar
+  // Fetch platform-wide stats for top bar
   api.get('/platform-stats').then(function(ps) {
-    var bar = document.getElementById('platform-bar');
+    var bar = document.getElementById('pb-content');
     if (bar) {
       var items = [
-        { label: 'Emails Generated', value: ps.totalEmails, color: '#34d399', icon: '\u{1F4E7}' },
-        { label: 'Research Reports', value: ps.totalResearch, color: '#60a5fa', icon: '\u{1F50D}' },
+        { label: 'Emails', value: ps.totalEmails, color: '#34d399', icon: '\u{1F4E7}' },
+        { label: 'Research', value: ps.totalResearch, color: '#60a5fa', icon: '\u{1F50D}' },
         { label: 'Campaigns', value: ps.totalCampaigns, color: '#a78bfa', icon: '\u{1F3AF}' },
-        { label: 'Active Users', value: ps.totalUsers, color: '#fbbf24', icon: '\u{1F465}' },
+        { label: 'Users', value: ps.totalUsers, color: '#fbbf24', icon: '\u{1F465}' },
       ];
       bar.innerHTML = items.map(function(item) {
-        return '<div style="display:flex;align-items:center;gap:6px">'
-          + '<span style="font-size:13px">' + item.icon + '</span>'
-          + '<span class="platform-counter" style="color:' + item.color + ';font-size:14px;font-variant-numeric:tabular-nums" data-target="' + item.value + '">0</span>'
-          + '<span style="color:var(--text-muted)">' + item.label + '</span>'
-          + '</div>';
-      }).join('<span style="color:rgba(255,255,255,0.08)">|</span>');
+        return '<span style="display:inline-flex;align-items:center;gap:4px">'
+          + '<span style="font-size:12px">' + item.icon + '</span>'
+          + '<span class="platform-counter" style="color:' + item.color + ';font-size:12px;font-variant-numeric:tabular-nums;font-weight:700" data-target="' + item.value + '">0</span>'
+          + '<span style="color:var(--text-muted);font-weight:500">' + item.label + '</span>'
+          + '</span>';
+      }).join('<span style="color:rgba(255,255,255,0.06)">|</span>');
 
-      // Animate counters
       bar.querySelectorAll('.platform-counter').forEach(function(el) {
         var target = parseInt(el.getAttribute('data-target')) || 0;
-        var duration = 1500;
+        var duration = 1200;
         var start = performance.now();
         function tick(now) {
           var elapsed = now - start;

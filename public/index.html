@@ -13,7 +13,11 @@
 </head>
 <body>
   <div id="app">
-    <div id="top-banner" style="background:rgba(94,106,210,0.08);border-bottom:1px solid rgba(124,127,255,0.12);padding:6px 32px;text-align:center;font-size:12px;font-weight:500;color:var(--text-muted);letter-spacing:-0.1px">Bug or feedback? Report to <strong style="color:var(--text-secondary)">Arun Potta</strong></div>
+    <div id="platform-bar" style="background:rgba(94,106,210,0.06);border-bottom:1px solid rgba(124,127,255,0.1);padding:6px 32px;display:flex;align-items:center;justify-content:center;gap:20px;font-size:11px;font-weight:600;flex-wrap:wrap">
+      <span style="color:var(--text-muted);font-size:10px">Bug or feedback? Report to <strong style="color:var(--text-secondary)">Arun Potta</strong></span>
+      <span style="color:rgba(255,255,255,0.08)">|</span>
+      <span id="pb-content" style="display:flex;align-items:center;gap:16px"></span>
+    </div>
     <nav id="nav">
       <div class="nav-inner">
         <a href="#/" class="nav-brand">
@@ -115,7 +119,6 @@
       </div>
     </nav>
     <main id="main"></main>
-    <div id="platform-bar" style="position:fixed;bottom:0;left:0;right:0;background:rgba(15,16,17,0.85);backdrop-filter:blur(12px);border-top:1px solid rgba(255,255,255,0.04);padding:8px 32px;display:flex;align-items:center;justify-content:center;gap:24px;font-size:11px;font-weight:600;z-index:90"></div>
   </div>
   <script src="/app.js"></script>
 </body>

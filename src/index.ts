@@ -2628,15 +2628,20 @@ ${campaign.custom_context ? '\nCAMPAIGN CONTEXT: ' + campaign.custom_context : '
     }
   }
 
-  const newGenCount = generatedIds.size + results.filter(r => r.status === 'generated').length;
-  await c.env.DB.prepare('UPDATE campaigns SET generated = ? WHERE id = ?').bind(newGenCount, campaignId).run();
+  const successCount = results.filter(r => r.status === 'generated').length;
+  const newGenCount = generatedIds.size + successCount;
+  const remaining = accountIds.length - newGenCount;
+  const isComplete = remaining <= 0;
+
+  await c.env.DB.prepare('UPDATE campaigns SET generated = ?, status = ? WHERE id = ?')
+    .bind(newGenCount, isComplete ? 'complete' : 'generating', campaignId).run();
 
   return c.json({
-    status: 'generating',
+    status: isComplete ? 'complete' : 'generating',
     generated: newGenCount,
     total: campaign.total_accounts,
     batch: results,
-    hasMore: pendingIds.length > 2,
+    hasMore: !isComplete,
   });
 });
 

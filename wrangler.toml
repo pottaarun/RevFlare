@@ -17,3 +17,7 @@ binding = "AI"
 
 [browser]
 binding = "BROWSER"
+
+[[kv_namespaces]]
+binding = "THREAT_CACHE"
+id = "3411703281fd4f8ea764bea07f6ec395"

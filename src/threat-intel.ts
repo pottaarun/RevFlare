@@ -304,46 +304,105 @@ async function fetchMediaStack(apiKey: string): Promise<NewsArticle[]> {
 export interface ThreatIncident {
   title: string; summary: string; url: string; publishedAt: string; source: string;
   score: number; cfProducts: string[]; country: string; product: string;
+  isNew?: boolean; // true if first seen in this fetch (not in KV dedup set)
 }
 
-export async function fetchThreatIntelligence(daysBack: number = 14, apiKeys?: { newsApi?: string; gNews?: string; mediaStack?: string }): Promise<{ incidents: ThreatIncident[]; sourceCount: number; totalFetched: number }> {
+// ── KV dedup helpers ───────────────────────────────────────────────
+function hashUrl(url: string): string {
+  // Fast non-crypto hash — just need uniqueness, not security
+  let h = 0;
+  for (let i = 0; i < url.length; i++) { h = ((h << 5) - h + url.charCodeAt(i)) | 0; }
+  return 'art:' + (h >>> 0).toString(36);
+}
+
+async function getSeenUrls(kv: KVNamespace | undefined): Promise<Set<string>> {
+  if (!kv) return new Set();
+  try {
+    const data = await kv.get('seen_urls', 'json') as string[] | null;
+    return new Set(data || []);
+  } catch { return new Set(); }
+}
+
+async function persistSeenUrls(kv: KVNamespace | undefined, urls: Set<string>): Promise<void> {
+  if (!kv) return;
+  try {
+    // Keep max 5000 URLs, trim oldest (set has insertion order)
+    const arr = Array.from(urls);
+    const trimmed = arr.length > 5000 ? arr.slice(arr.length - 5000) : arr;
+    await kv.put('seen_urls', JSON.stringify(trimmed), { expirationTtl: 30 * 86400 }); // 30-day TTL
+  } catch {}
+}
+
+async function getCachedResult(kv: KVNamespace | undefined): Promise<{ incidents: ThreatIncident[]; sourceCount: number; totalFetched: number } | null> {
+  if (!kv) return null;
+  try {
+    return await kv.get('threat_cache', 'json');
+  } catch { return null; }
+}
+
+async function setCachedResult(kv: KVNamespace | undefined, data: any): Promise<void> {
+  if (!kv) return;
+  try {
+    await kv.put('threat_cache', JSON.stringify(data), { expirationTtl: 600 }); // 10-min cache
+  } catch {}
+}
+
+export async function fetchThreatIntelligence(daysBack: number = 14, apiKeys?: { newsApi?: string; gNews?: string; mediaStack?: string }, kv?: KVNamespace): Promise<{ incidents: ThreatIncident[]; sourceCount: number; totalFetched: number; cached: boolean }> {
+  // Check cache first (avoid hammering feeds on every page load)
+  const cached = await getCachedResult(kv);
+  if (cached) return { ...cached, cached: true };
+
   const [rss, gdelt, google, bing, newsApi, gNews, mediaStack] = await Promise.all([
     fetchRss(), fetchGDELT(daysBack), fetchGoogleNews(), fetchBingNews(),
     fetchNewsAPI(apiKeys?.newsApi || ''), fetchGNews(apiKeys?.gNews || ''), fetchMediaStack(apiKeys?.mediaStack || ''),
   ]);
 
-  // Dedup
-  const seen = new Set<string>();
+  // In-request dedup by URL
+  const inReqSeen = new Set<string>();
   const all: NewsArticle[] = [];
   [rss, gdelt, google, bing, newsApi, gNews, mediaStack].forEach(batch => {
-    batch.forEach(a => { if (a.url && !seen.has(a.url)) { all.push(a); seen.add(a.url); } });
+    batch.forEach(a => { if (a.url && !inReqSeen.has(a.url)) { all.push(a); inReqSeen.add(a.url); } });
   });
   const totalFetched = all.length;
+
+  // KV dedup — filter out articles already seen in previous requests
+  const kvSeen = await getSeenUrls(kv);
+  const newArticles = all.filter(a => !kvSeen.has(hashUrl(a.url)));
+
+  // Persist all URLs (old + new) to KV
+  all.forEach(a => kvSeen.add(hashUrl(a.url)));
+  persistSeenUrls(kv, kvSeen); // fire-and-forget
+
+  // Use all articles for scoring (not just new), but flag new ones
+  const newUrlSet = new Set(newArticles.map(a => a.url));
 
   // Filter by date
   const cutoff = Date.now() - daysBack * 86400000;
   let filtered = all.filter(a => { const d = parseArticleDate(a.publishedAt); return d && d.getTime() >= cutoff; });
 
-  // Pre-filter by relevance score (uses SECURITY_DOMAINS boost + entity check)
+  // Pre-filter by relevance
   filtered = filtered.filter(a => newsRelevanceScore(a) > 0);
-
-  // Sort by relevance score desc
   filtered.sort((a, b) => newsRelevanceScore(b) - newsRelevanceScore(a));
 
-  // Enrich with country, product, CF products, severity score
+  // Enrich
   const incidents: ThreatIncident[] = filtered.slice(0, 100).map(a => ({
     ...a,
     score: scoreIncident(a),
     cfProducts: inferCloudflareProducts(a.title + ' ' + a.summary),
     country: detectCountryFromItem(a) || '',
     product: extractProduct(a.title + ' ' + a.summary),
+    isNew: newUrlSet.has(a.url),
   }));
 
-  // Final sort by severity
   incidents.sort((a, b) => b.score - a.score);
 
   const sourceCount = [rss.length, gdelt.length, google.length, bing.length, newsApi.length, gNews.length, mediaStack.length].filter(n => n > 0).length;
-  return { incidents: incidents.slice(0, 50), sourceCount, totalFetched };
+  const result = { incidents: incidents.slice(0, 50), sourceCount, totalFetched, cached: false };
+
+  // Cache for 10 minutes
+  setCachedResult(kv, result);
+
+  return result;
 }
 
 // ── AI enrichment prompt ───────────────────────────────────────────

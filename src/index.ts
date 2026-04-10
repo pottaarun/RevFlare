@@ -8,11 +8,12 @@ type Bindings = {
   DB: D1Database;
   AI: Ai;
   BROWSER: Fetcher;
+  THREAT_CACHE: KVNamespace;
   CF_API_TOKEN?: string;
   CF_ACCOUNT_ID?: string;
   GOOGLE_CLIENT_ID?: string;
   GOOGLE_CLIENT_SECRET?: string;
-  INTRICATELY_API_KEY?: string; // HG Cloud Dynamics / Intricately API key
+  INTRICATELY_API_KEY?: string;
 };
 
 const app = new Hono<{ Bindings: Bindings; Variables: { userEmail: string } }>();
@@ -2701,7 +2702,7 @@ async function getNewsApiKeys(db: D1Database): Promise<{ newsApi: string; gNews:
 app.get('/api/threats', async (c) => {
   const days = parseInt(c.req.query('days') || '14');
   const apiKeys = await getNewsApiKeys(c.env.DB);
-  const result = await fetchThreatIntelligence(days, apiKeys);
+  const result = await fetchThreatIntelligence(days, apiKeys, c.env.THREAT_CACHE);
   return c.json(result);
 });
 
@@ -2713,7 +2714,7 @@ app.get('/api/threats/:accountId', async (c) => {
   if (!account) return c.json({ error: 'Account not found' }, 404);
 
   const apiKeys = await getNewsApiKeys(c.env.DB);
-  const result = await fetchThreatIntelligence(14, apiKeys);
+  const result = await fetchThreatIntelligence(14, apiKeys, c.env.THREAT_CACHE);
   const matched = matchIncidentsToAccount(result.incidents, account);
 
   return c.json({
@@ -2734,7 +2735,7 @@ app.post('/api/threats/:accountId/email', async (c) => {
   if (!account) return c.json({ error: 'Account not found' }, 404);
 
   const apiKeys2 = await getNewsApiKeys(c.env.DB);
-  const result = await fetchThreatIntelligence(14, apiKeys2);
+  const result = await fetchThreatIntelligence(14, apiKeys2, c.env.THREAT_CACHE);
   const matched = matchIncidentsToAccount(result.incidents, account);
 
   if (!matched.length) return c.json({ error: 'No relevant incidents found for this account' }, 404);

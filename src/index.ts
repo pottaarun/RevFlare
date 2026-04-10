@@ -2701,8 +2701,12 @@ async function getNewsApiKeys(db: D1Database): Promise<{ newsApi: string; gNews:
 // Global threat feed (all incidents, not account-specific)
 app.get('/api/threats', async (c) => {
   const days = parseInt(c.req.query('days') || '14');
+  const country = c.req.query('country') || '';
   const apiKeys = await getNewsApiKeys(c.env.DB);
   const result = await fetchThreatIntelligence(days, apiKeys, c.env.THREAT_CACHE);
+  if (country) {
+    result.incidents = result.incidents.filter((inc: any) => (inc.country || '').toUpperCase() === country.toUpperCase());
+  }
   return c.json(result);
 });
 

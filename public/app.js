@@ -510,140 +510,252 @@ function showResearchResult(a, cache, type) {
   });
 }
 
-// ── Global Threat Intel Dashboard ──────────────────────────────────
+// ── Global Threat Intel Dashboard (with country filter + lookback) ──
 function renderGlobalThreats(c) {
-  c.innerHTML = '<div class="loading-state"><div class="spinner"></div>Scanning 26 RSS feeds, GDELT, Google News, Bing News...</div>';
-  api.get('/threats?days=14').then(function(data) {
-    var incidents = data.incidents || [];
-    var h = '<div class="fade-in">';
-    h += '<div class="page-header"><h1 class="page-title">Threat Intelligence</h1>';
-    h += '<p class="page-subtitle">Real-time cybersecurity incidents from ' + data.sourceCount + ' source categories. ' + data.totalFetched + ' articles scanned, ' + incidents.length + ' entity-compromise incidents found.</p></div>';
+  var h = '<div class="fade-in">';
+  h += '<div class="page-header"><h1 class="page-title">Threat Intelligence</h1>';
+  h += '<p class="page-subtitle">Real-time cybersecurity incidents aggregated from 26 RSS feeds, GDELT, Google News, Bing News, and optional paid sources.</p></div>';
 
-    // Stats
-    var highSev = incidents.filter(function(i){return i.score > 80}).length;
-    var medSev = incidents.filter(function(i){return i.score > 50 && i.score <= 80}).length;
-    h += '<div class="stats-row" style="margin-bottom:28px">';
-    h += '<div class="stat-card sc-cdn"><div class="stat-label">Total Incidents</div><div class="stat-value" style="color:#f9a8d4">' + incidents.length + '</div><div class="stat-sub">Last 14 days</div></div>';
-    h += '<div class="stat-card sc-revenue"><div class="stat-label">Critical/High</div><div class="stat-value" style="color:#f87171">' + highSev + '</div><div class="stat-sub">Score 80+</div></div>';
-    h += '<div class="stat-card sc-avg"><div class="stat-label">Medium</div><div class="stat-value" style="color:#fcd34d">' + medSev + '</div><div class="stat-sub">Score 50-80</div></div>';
-    h += '<div class="stat-card sc-accounts"><div class="stat-label">Articles Scanned</div><div class="stat-value" style="color:#93bbfd">' + data.totalFetched + '</div><div class="stat-sub">Across all feeds</div></div>';
-    h += '</div>';
+  // Controls
+  h += '<div class="toolbar" style="margin-bottom:24px">';
+  h += '<select class="filter-select" id="threat-country"><option value="">All Countries</option>';
+  var countries = ['US','CA','UK','DE','FR','AU','JP','IN','BR','ES','IT','NL','SE','NO','FI','DK','IE','CH','AT'];
+  var countryNames = {'US':'United States','CA':'Canada','UK':'United Kingdom','DE':'Germany','FR':'France','AU':'Australia','JP':'Japan','IN':'India','BR':'Brazil','ES':'Spain','IT':'Italy','NL':'Netherlands','SE':'Sweden','NO':'Norway','FI':'Finland','DK':'Denmark','IE':'Ireland','CH':'Switzerland','AT':'Austria'};
+  for (var i = 0; i < countries.length; i++) h += '<option value="' + countries[i] + '">' + (countryNames[countries[i]] || countries[i]) + '</option>';
+  h += '</select>';
+  h += '<select class="filter-select" id="threat-days"><option value="7">Last 7 days</option><option value="14" selected>Last 14 days</option><option value="30">Last 30 days</option><option value="60">Last 60 days</option><option value="90">Last 90 days</option></select>';
+  h += '<button class="btn btn-primary" id="threat-scan-btn">' + IC.shield + ' Scan Now</button>';
+  h += '</div>';
 
-    for (var i = 0; i < incidents.length; i++) {
-      var inc = incidents[i];
-      var sev = inc.score > 80 ? '#f87171' : inc.score > 50 ? '#fbbf24' : '#8a8f98';
-      var prods = (inc.cfProducts || []).slice(0, 5);
-      h += '<div class="d-card" style="margin-bottom:10px;border-color:' + sev + '15">';
-      h += '<div style="display:flex;align-items:flex-start;gap:12px">';
-      h += '<div style="font-size:18px;font-weight:800;color:' + sev + ';min-width:36px;text-align:center">' + inc.score + '</div>';
-      h += '<div style="flex:1"><div style="font-size:13px;font-weight:700;color:var(--text-primary)">' + inc.title + '</div>';
-      h += '<div style="font-size:11px;color:var(--text-muted);margin-top:2px">' + inc.source + ' &middot; ' + (inc.publishedAt ? new Date(inc.publishedAt).toLocaleDateString() : '') + '</div>';
-      if (prods.length) { h += '<div style="display:flex;flex-wrap:wrap;gap:3px;margin-top:6px">'; for (var j=0;j<prods.length;j++) h += '<span class="stack-chip is-cf" style="font-size:10px;padding:2px 6px">' + prods[j] + '</span>'; h += '</div>'; }
-      h += '</div>';
-      h += '<a href="' + inc.url + '" target="_blank" class="btn btn-ghost btn-sm" style="flex-shrink:0">' + IC.globe + '</a>';
-      h += '</div></div>';
-    }
-    h += '</div>';
-    c.innerHTML = h;
-  }).catch(function(err) {
-    c.innerHTML = '<div style="padding:32px;color:var(--red)">' + err.message + '</div>';
-  });
-}
+  h += '<div id="threat-stats" style="margin-bottom:24px"></div>';
+  h += '<div id="threat-results"><div class="loading-state"><div class="spinner"></div>Scanning threat feeds...</div></div>';
+  h += '</div>';
+  c.innerHTML = h;
 
-// ── Threat Intel Tab ──────────────────────────────────────────────
-function tabThreats(c, a) {
-  c.innerHTML = '<div class="loading-state"><div class="spinner"></div>Scanning threat intelligence feeds...</div>';
+  function loadThreats() {
+    var days = document.getElementById('threat-days').value;
+    var country = document.getElementById('threat-country').value;
+    var results = document.getElementById('threat-results');
+    var stats = document.getElementById('threat-stats');
+    results.innerHTML = '<div class="loading-state"><div class="ai-pulse" style="width:40px;height:40px">' + IC.shield + '</div><div style="color:var(--text-secondary);font-size:14px;font-weight:600">Scanning threat intelligence feeds...</div><div style="color:var(--text-muted);font-size:12px">26 RSS feeds + GDELT + Google News + Bing News &mdash; lookback: ' + days + ' days' + (country ? ' &mdash; country: ' + country : '') + '</div></div>';
 
-  api.get('/threats/' + a.id).then(function(data) {
-    var incidents = data.incidents || [];
-    var h = '<div class="fade-in">';
-    h += '<p style="font-size:14px;color:var(--text-muted);margin-bottom:20px">Real-time cybersecurity incidents relevant to <strong style="color:var(--text-primary)">' + a.account_name + '</strong> (' + (a.industry || 'all industries') + '). Aggregated from 26 RSS feeds, GDELT, Google News, and Bing News. ' + data.totalScanned + ' articles scanned.</p>';
+    api.get('/threats?days=' + days + (country ? '&country=' + country : '')).then(function(data) {
+      var incidents = data.incidents || [];
 
-    if (!incidents.length) {
-      h += '<div style="text-align:center;padding:48px 0;color:var(--text-muted)"><div style="font-size:32px;margin-bottom:12px">' + IC.shield + '</div><p style="font-size:14px">No recent incidents matching ' + (a.industry || 'this account') + ' found in the last 14 days.</p><p style="font-size:12px;margin-top:8px">This is actually good news for the prospect. Try the global feed below.</p>';
-      h += '<button class="btn btn-ghost" id="load-global-threats" style="margin-top:16px">' + IC.alert + ' View All Global Threats</button></div>';
-    } else {
-      h += '<div class="persona-section-title" style="margin-bottom:12px">' + incidents.length + ' Relevant Incidents</div>';
+      // Client-side country filter if specified
+      if (country) {
+        incidents = incidents.filter(function(inc) {
+          return (inc.country || '').toUpperCase() === country.toUpperCase() ||
+            (inc.title + ' ' + inc.summary).toLowerCase().includes((countryNames[country] || country).toLowerCase());
+        });
+      }
+
+      // Stats
+      var highSev = incidents.filter(function(i){return i.score > 80}).length;
+      var medSev = incidents.filter(function(i){return i.score > 50 && i.score <= 80}).length;
+      var newCount = incidents.filter(function(i){return i.isNew}).length;
+      stats.innerHTML = '<div class="stats-row">'
+        + '<div class="stat-card sc-cdn"><div class="stat-icon">\u{1F6A8}</div><div class="stat-label">Total Incidents</div><div class="stat-value" style="color:#f9a8d4">' + incidents.length + '</div><div class="stat-sub">Last ' + days + ' days' + (country ? ' in ' + (countryNames[country]||country) : '') + '</div></div>'
+        + '<div class="stat-card sc-revenue"><div class="stat-icon">\u{1F534}</div><div class="stat-label">Critical / High</div><div class="stat-value" style="color:#f87171">' + highSev + '</div><div class="stat-sub">Score 80+</div></div>'
+        + '<div class="stat-card sc-avg"><div class="stat-icon">\u{1F7E0}</div><div class="stat-label">Medium</div><div class="stat-value" style="color:#fcd34d">' + medSev + '</div><div class="stat-sub">Score 50-80</div></div>'
+        + '<div class="stat-card sc-accounts"><div class="stat-icon">\u{1F4F0}</div><div class="stat-label">Articles Scanned</div><div class="stat-value" style="color:#93bbfd">' + data.totalFetched + '</div><div class="stat-sub">' + data.sourceCount + ' source categories</div></div>'
+        + '<div class="stat-card sc-pipeline"><div class="stat-icon">\u{2728}</div><div class="stat-label">New (First Seen)</div><div class="stat-value" style="color:#fdba74">' + newCount + '</div><div class="stat-sub">Not in previous scans</div></div>'
+        + (data.cached ? '<div class="stat-card sc-spend"><div class="stat-icon">\u{26A1}</div><div class="stat-label">From Cache</div><div class="stat-value" style="color:#c4b5fd">Yes</div><div class="stat-sub">10-min KV cache</div></div>' : '')
+        + '</div>';
+
+      if (!incidents.length) {
+        results.innerHTML = '<div style="text-align:center;padding:48px 0;color:var(--text-muted)"><div style="font-size:32px;margin-bottom:12px">' + IC.shield + '</div><p>No entity-compromise incidents found matching your filters.</p><p style="font-size:12px;margin-top:8px">Try increasing the lookback period or removing the country filter.</p></div>';
+        return;
+      }
+
+      var rh = '';
       for (var i = 0; i < incidents.length; i++) {
         var inc = incidents[i];
-        var severity = inc.score > 80 ? 'var(--red)' : inc.score > 50 ? 'var(--amber)' : 'var(--text-muted)';
-        var prods = (inc.cfProducts || []).slice(0, 4);
-        h += '<div class="d-card" style="margin-bottom:12px;border-color:' + severity + '20">';
-        h += '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px">';
-        h += '<div style="flex:1"><div style="font-size:14px;font-weight:700;color:var(--text-primary);line-height:1.4">' + inc.title + '</div>';
-        h += '<div style="font-size:12px;color:var(--text-muted);margin-top:4px">' + inc.source + ' &middot; ' + (inc.publishedAt ? new Date(inc.publishedAt).toLocaleDateString() : '') + '</div>';
-        h += '<p style="font-size:13px;color:var(--text-secondary);margin-top:8px;line-height:1.6">' + (inc.summary || '').slice(0, 200) + '</p>';
-        if (prods.length) {
-          h += '<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:8px">';
-          for (var j = 0; j < prods.length; j++) h += '<span class="stack-chip is-cf">' + prods[j] + '</span>';
-          h += '</div>';
-        }
-        h += '</div>';
-        h += '<div style="text-align:center;flex-shrink:0"><div style="font-size:20px;font-weight:800;color:' + severity + '">' + inc.score + '</div><div style="font-size:9px;color:var(--text-muted);font-weight:600">SEVERITY</div></div>';
-        h += '</div>';
-        h += '<div style="display:flex;gap:8px;margin-top:12px;padding-top:10px;border-top:1px solid var(--border-glass)">';
-        h += '<button class="btn btn-primary btn-sm gen-threat-email" data-idx="' + i + '">' + IC.send + ' Generate Outreach Email</button>';
-        h += '<a href="' + inc.url + '" target="_blank" class="btn btn-ghost btn-sm">' + IC.globe + ' Read Article</a>';
-        h += '</div></div>';
+        var sev = inc.score > 80 ? '#f87171' : inc.score > 50 ? '#fbbf24' : '#8a8f98';
+        var prods = (inc.cfProducts || []).slice(0, 5);
+        var isNew = inc.isNew;
+        rh += '<div class="d-card" style="margin-bottom:10px;border-color:' + sev + '20">';
+        rh += '<div style="display:flex;align-items:flex-start;gap:12px">';
+        rh += '<div style="text-align:center;flex-shrink:0;min-width:44px"><div style="font-size:20px;font-weight:800;color:' + sev + '">' + inc.score + '</div><div style="font-size:8px;color:var(--text-muted);font-weight:700;text-transform:uppercase">severity</div></div>';
+        rh += '<div style="flex:1">';
+        rh += '<div style="font-size:13px;font-weight:700;color:var(--text-primary);line-height:1.4">';
+        if (isNew) rh += '<span style="font-size:9px;padding:2px 5px;background:rgba(251,146,60,0.12);color:#fb923c;border-radius:3px;font-weight:700;margin-right:6px;vertical-align:middle">NEW</span>';
+        rh += inc.title + '</div>';
+        rh += '<div style="font-size:11px;color:var(--text-muted);margin-top:3px">';
+        rh += inc.source;
+        if (inc.country) rh += ' &middot; ' + inc.country;
+        if (inc.product) rh += ' &middot; ' + inc.product;
+        rh += ' &middot; ' + (inc.publishedAt ? new Date(inc.publishedAt).toLocaleDateString() : '');
+        rh += '</div>';
+        if (inc.summary) rh += '<p style="font-size:12px;color:var(--text-tertiary);margin-top:6px;line-height:1.5">' + inc.summary.slice(0, 150) + '</p>';
+        if (prods.length) { rh += '<div style="display:flex;flex-wrap:wrap;gap:3px;margin-top:6px">'; for (var j=0;j<prods.length;j++) rh += '<span class="stack-chip is-cf" style="font-size:10px;padding:2px 6px">' + prods[j] + '</span>'; rh += '</div>'; }
+        rh += '</div>';
+        rh += '<a href="' + inc.url + '" target="_blank" class="btn btn-ghost btn-sm" style="flex-shrink:0;font-size:11px">' + IC.globe + ' Read</a>';
+        rh += '</div></div>';
+      }
+      results.innerHTML = rh;
+    }).catch(function(err) {
+      results.innerHTML = '<div style="padding:32px;color:var(--red);text-align:center">' + err.message + '</div>';
+    });
+  }
+
+  // Auto-load on page open
+  loadThreats();
+
+  // Scan button
+  document.getElementById('threat-scan-btn').addEventListener('click', loadThreats);
+
+  // Also reload when filters change
+  document.getElementById('threat-days').addEventListener('change', loadThreats);
+  document.getElementById('threat-country').addEventListener('change', loadThreats);
+}
+
+// ── Threat Intel Tab (per-account, with country/days filters + BDR email gen) ──
+function tabThreats(c, a) {
+  var countryNames = {'US':'United States','CA':'Canada','UK':'United Kingdom','DE':'Germany','FR':'France','AU':'Australia','JP':'Japan','IN':'India','BR':'Brazil','ES':'Spain','IT':'Italy','NL':'Netherlands','SE':'Sweden','NO':'Norway','FI':'Finland','DK':'Denmark','IE':'Ireland','CH':'Switzerland','AT':'Austria'};
+  var countries = Object.keys(countryNames);
+
+  // Pre-select country from account billing_country if available
+  var defaultCountry = '';
+  if (a.billing_country) {
+    for (var i = 0; i < countries.length; i++) {
+      if (a.billing_country.toLowerCase().includes(countryNames[countries[i]].toLowerCase()) || a.billing_country.toUpperCase() === countries[i]) {
+        defaultCountry = countries[i]; break;
       }
     }
-    h += '<div id="threat-email-output" style="margin-top:24px"></div>';
-    h += '</div>';
-    c.innerHTML = h;
+  }
 
-    // Generate email from incident
-    var emailBtns = c.querySelectorAll('.gen-threat-email');
-    for (var i = 0; i < emailBtns.length; i++) {
-      (function(btn) {
-        btn.addEventListener('click', function() {
-          var idx = parseInt(btn.getAttribute('data-idx'));
-          var out = document.getElementById('threat-email-output');
-          btn.disabled = true;
-          btn.innerHTML = '<div class="spinner" style="width:12px;height:12px;border-width:1.5px;display:inline-block;vertical-align:middle;margin-right:6px"></div> Generating...';
-          out.innerHTML = '<div style="padding:32px;text-align:center"><div class="spinner" style="margin:0 auto 12px"></div><div style="color:var(--text-muted);font-size:13px">Generating incident-triggered email for ' + a.account_name + '...</div></div>';
-          out.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  var h = '<div class="fade-in">';
+  h += '<p style="font-size:14px;color:var(--text-muted);margin-bottom:16px">Cybersecurity incidents relevant to <strong style="color:var(--text-primary)">' + a.account_name + '</strong>. Matches by industry (' + (a.industry || 'all') + '), country, and company name. Generate incident-triggered BDR emails.</p>';
 
-          api.post('/threats/' + a.id + '/email', { incidentIndex: idx, persona: 'bdr' }).then(function(r) {
-            var emailBody = (r.content || '').replace(/^Subject:.*\n*/im, '');
-            var subject = (r.content || '').match(/Subject:?\s*(.+?)(?:\n|$)/i);
-            subject = subject ? subject[1].trim() : 'Security Incident Alert';
-            out.innerHTML = '<div class="email-preview slide-up">'
-              + '<div class="email-toolbar"><div class="email-dot r"></div><div class="email-dot y"></div><div class="email-dot g"></div><span style="margin-left:auto;font-size:11px;color:var(--text-muted);font-weight:600">Incident-Triggered / BDR</span></div>'
-              + '<div class="email-subject-bar"><div style="display:flex;align-items:center;gap:8px;margin-bottom:8px"><span style="font-size:20px">' + IC.alert + '</span><div><div style="font-size:11px;color:var(--red);font-weight:600">Triggered by: ' + (r.incident?.title || '').slice(0, 60) + '</div><div style="font-size:10px;color:var(--text-muted)">Severity: ' + (r.incident?.score || 0) + ' | CF Products: ' + (r.incident?.cfProducts || []).join(', ') + '</div></div></div>'
-              + '<div class="email-subject-label">Subject</div><div class="email-subject">' + subject + '</div></div>'
-              + '<div class="email-body">' + md(emailBody) + '</div>'
-              + '<div class="email-actions"><button class="btn btn-primary btn-sm" onclick="copyEl(this,\'email\')">' + IC.copy + ' Copy Email</button></div>'
-              + '</div>';
-            btn.disabled = false;
-            btn.innerHTML = IC.send + ' Generate Outreach Email';
-          }).catch(function(err) {
-            out.innerHTML = '<div style="padding:24px;color:var(--red);text-align:center">' + err.message + '</div>';
-            btn.disabled = false;
-            btn.innerHTML = IC.send + ' Generate Outreach Email';
+  // Controls
+  h += '<div class="toolbar" style="margin-bottom:20px">';
+  h += '<select class="filter-select" id="acct-threat-country"><option value="">All Countries</option>';
+  for (var i = 0; i < countries.length; i++) h += '<option value="' + countries[i] + '"' + (countries[i] === defaultCountry ? ' selected' : '') + '>' + countryNames[countries[i]] + '</option>';
+  h += '</select>';
+  h += '<select class="filter-select" id="acct-threat-days"><option value="7">7 days</option><option value="14" selected>14 days</option><option value="30">30 days</option><option value="60">60 days</option><option value="90">90 days</option></select>';
+  h += '<select class="filter-select" id="acct-threat-persona"><option value="bdr">BDR</option><option value="ae">AE</option><option value="csm">CSM</option><option value="se">SE</option><option value="vp_sales">VP Sales</option></select>';
+  h += '<button class="btn btn-primary btn-sm" id="acct-threat-scan">' + IC.shield + ' Scan</button>';
+  h += '<button class="btn btn-ghost btn-sm" id="acct-threat-global">View All Global</button>';
+  h += '</div>';
+
+  h += '<div id="acct-threat-stats"></div>';
+  h += '<div id="acct-threat-results"><div class="loading-state"><div class="spinner"></div>Scanning...</div></div>';
+  h += '<div id="threat-email-output" style="margin-top:24px"></div>';
+  h += '</div>';
+  c.innerHTML = h;
+
+  var lastIncidents = [];
+
+  function loadAccountThreats() {
+    var days = document.getElementById('acct-threat-days').value;
+    var country = document.getElementById('acct-threat-country').value;
+    var resultsEl = document.getElementById('acct-threat-results');
+    var statsEl = document.getElementById('acct-threat-stats');
+    resultsEl.innerHTML = '<div class="loading-state"><div class="ai-pulse" style="width:36px;height:36px">' + IC.shield + '</div><div style="color:var(--text-secondary);font-size:13px;font-weight:600">Scanning ' + days + '-day threat feeds' + (country ? ' for ' + countryNames[country] : '') + '...</div></div>';
+
+    api.get('/threats/' + a.id + '?days=' + days).then(function(data) {
+      var incidents = data.incidents || [];
+
+      // Client-side country filter
+      if (country) {
+        incidents = incidents.filter(function(inc) {
+          return (inc.country || '').toUpperCase() === country ||
+            (inc.title + ' ' + inc.summary).toLowerCase().includes((countryNames[country] || '').toLowerCase());
+        });
+      }
+
+      lastIncidents = incidents;
+
+      // Stats bar
+      var highSev = incidents.filter(function(x){return x.score > 80}).length;
+      statsEl.innerHTML = '<div style="display:flex;gap:16px;margin-bottom:16px;flex-wrap:wrap">'
+        + '<span style="font-size:12px;color:var(--text-muted)"><strong style="color:var(--text-primary)">' + incidents.length + '</strong> matched incidents</span>'
+        + '<span style="font-size:12px;color:var(--red)"><strong>' + highSev + '</strong> critical/high</span>'
+        + '<span style="font-size:12px;color:var(--text-muted)">' + data.totalScanned + ' articles scanned</span>'
+        + (data.cached ? '<span style="font-size:11px;color:var(--accent-bright)">cached</span>' : '')
+        + '</div>';
+
+      if (!incidents.length) {
+        resultsEl.innerHTML = '<div style="text-align:center;padding:40px 0;color:var(--text-muted)">' + IC.shield + '<p style="margin-top:12px">No incidents matching ' + a.account_name + ' (' + (a.industry || 'all') + ')' + (country ? ' in ' + countryNames[country] : '') + '.</p><p style="font-size:12px;margin-top:4px">Try increasing lookback days or removing the country filter.</p></div>';
+        return;
+      }
+
+      var rh = '';
+      for (var i = 0; i < incidents.length; i++) {
+        var inc = incidents[i];
+        var sev = inc.score > 80 ? '#f87171' : inc.score > 50 ? '#fbbf24' : '#8a8f98';
+        var prods = (inc.cfProducts || []).slice(0, 5);
+        rh += '<div class="d-card" style="margin-bottom:10px;border-color:' + sev + '20">';
+        rh += '<div style="display:flex;align-items:flex-start;gap:12px">';
+        rh += '<div style="text-align:center;flex-shrink:0;min-width:40px"><div style="font-size:18px;font-weight:800;color:' + sev + '">' + inc.score + '</div><div style="font-size:8px;color:var(--text-muted);font-weight:700">SEVERITY</div></div>';
+        rh += '<div style="flex:1">';
+        if (inc.isNew) rh += '<span style="font-size:9px;padding:2px 5px;background:rgba(251,146,60,0.12);color:#fb923c;border-radius:3px;font-weight:700;margin-right:4px">NEW</span>';
+        rh += '<span style="font-size:13px;font-weight:700;color:var(--text-primary)">' + inc.title + '</span>';
+        rh += '<div style="font-size:11px;color:var(--text-muted);margin-top:3px">' + inc.source;
+        if (inc.country) rh += ' &middot; ' + inc.country;
+        if (inc.product) rh += ' &middot; ' + inc.product;
+        rh += ' &middot; ' + (inc.publishedAt ? new Date(inc.publishedAt).toLocaleDateString() : '') + '</div>';
+        if (inc.summary) rh += '<p style="font-size:12px;color:var(--text-tertiary);margin-top:5px;line-height:1.5">' + inc.summary.slice(0, 180) + '</p>';
+        if (prods.length) { rh += '<div style="display:flex;flex-wrap:wrap;gap:3px;margin-top:6px">'; for (var j=0;j<prods.length;j++) rh += '<span class="stack-chip is-cf" style="font-size:10px;padding:2px 6px">' + prods[j] + '</span>'; rh += '</div>'; }
+        rh += '<div style="display:flex;gap:6px;margin-top:8px">';
+        rh += '<button class="btn btn-primary btn-sm gen-acct-threat-email" data-idx="' + i + '">' + IC.send + ' Draft Email</button>';
+        rh += '<a href="' + inc.url + '" target="_blank" class="btn btn-ghost btn-sm" style="font-size:11px">' + IC.globe + ' Article</a>';
+        rh += '</div></div></div></div>';
+      }
+      resultsEl.innerHTML = rh;
+
+      // Email gen handlers
+      var emailBtns = resultsEl.querySelectorAll('.gen-acct-threat-email');
+      for (var i = 0; i < emailBtns.length; i++) {
+        (function(btn) {
+          btn.addEventListener('click', function() {
+            var idx = parseInt(btn.getAttribute('data-idx'));
+            var persona = document.getElementById('acct-threat-persona').value;
+            var out = document.getElementById('threat-email-output');
+            btn.disabled = true;
+            btn.innerHTML = '<div class="spinner" style="width:12px;height:12px;border-width:1.5px;display:inline-block;vertical-align:middle;margin-right:4px"></div> Generating...';
+            out.innerHTML = '<div style="padding:32px;text-align:center"><div class="spinner" style="margin:0 auto 12px"></div><div style="color:var(--text-muted);font-size:13px">Generating ' + persona.toUpperCase() + ' email for ' + a.account_name + ' triggered by this incident...</div></div>';
+            out.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+            api.post('/threats/' + a.id + '/email', { incidentIndex: idx, persona: persona }).then(function(r) {
+              var emailBody = (r.content || '').replace(/^Subject:.*\n*/im, '');
+              var subjectM = (r.content || '').match(/Subject:?\s*(.+?)(?:\n|$)/i);
+              var subject = subjectM ? subjectM[1].trim() : 'Security Incident Alert';
+              var pm = PERSONA_META[persona] || {};
+              out.innerHTML = '<div class="email-preview slide-up">'
+                + '<div class="email-toolbar"><div class="email-dot r"></div><div class="email-dot y"></div><div class="email-dot g"></div><span style="margin-left:auto;font-size:11px;color:var(--text-muted);font-weight:600">Incident-Triggered / ' + persona.toUpperCase() + '</span></div>'
+                + '<div class="email-subject-bar"><div style="display:flex;align-items:center;gap:10px;margin-bottom:10px"><span style="font-size:24px">' + (pm.icon || IC.alert) + '</span><div><div style="font-size:11px;color:var(--red);font-weight:600">Triggered by: ' + (r.incident?.title || '').slice(0, 80) + '</div><div style="font-size:10px;color:var(--text-muted)">Severity: ' + (r.incident?.score || 0) + ' | ' + (r.incident?.cfProducts || []).join(', ') + '</div></div></div>'
+                + '<div class="email-subject-label">Subject</div><div class="email-subject">' + subject + '</div></div>'
+                + '<div class="email-body">' + md(emailBody) + '</div>'
+                + '<div class="email-actions"><button class="btn btn-primary btn-sm" onclick="copyEl(this,\'email\')">' + IC.copy + ' Copy Email</button>'
+                + (window._gmailConnected ? '<button class="btn btn-sm" style="background:linear-gradient(135deg,#34d399,#10b981);color:#fff" onclick="var to=prompt(\'Send to:\');if(!to)return;fetch(\'/api/gmail/send\',{method:\'POST\',headers:{\'Content-Type\':\'application/json\'},body:JSON.stringify({to:to,subject:\'' + subject.replace(/'/g, "\\'") + '\',body:this.closest(\'.email-preview\').querySelector(\'.email-body\').innerText})}).then(function(r){return r.json()}).then(function(d){if(d.success)alert(\'Sent!\');else alert(d.error)})">' + IC.send + ' Send via Gmail</button>' : '')
+                + '</div></div>';
+              btn.disabled = false;
+              btn.innerHTML = IC.send + ' Draft Email';
+            }).catch(function(err) {
+              out.innerHTML = '<div style="padding:24px;color:var(--red);text-align:center">' + err.message + '</div>';
+              btn.disabled = false;
+              btn.innerHTML = IC.send + ' Draft Email';
+            });
           });
-        });
-      })(emailBtns[i]);
-    }
+        })(emailBtns[i]);
+      }
+    }).catch(function(err) {
+      document.getElementById('acct-threat-results').innerHTML = '<div style="padding:24px;color:var(--red);text-align:center">' + err.message + '</div>';
+    });
+  }
 
-    // Global threats fallback button
-    var globalBtn = document.getElementById('load-global-threats');
-    if (globalBtn) {
-      globalBtn.addEventListener('click', function() {
-        globalBtn.innerHTML = '<div class="spinner" style="width:12px;height:12px;border-width:1.5px;display:inline-block;vertical-align:middle;margin-right:6px"></div> Loading...';
-        api.get('/threats?days=14').then(function(r) {
-          var h2 = '<div class="persona-section-title" style="margin-top:20px">' + r.incidents.length + ' Global Incidents (all industries)</div>';
-          for (var i = 0; i < Math.min(r.incidents.length, 15); i++) {
-            var inc = r.incidents[i];
-            h2 += '<div style="padding:8px 0;border-bottom:1px solid var(--border-glass);font-size:13px"><a href="' + inc.url + '" target="_blank" style="color:var(--accent-bright);text-decoration:none">' + inc.title + '</a> <span style="color:var(--text-muted);font-size:11px">' + inc.source + ' &middot; Score: ' + inc.score + '</span></div>';
-          }
-          globalBtn.parentElement.innerHTML += h2;
-        });
-      });
-    }
+  // Auto-load
+  loadAccountThreats();
 
-  }).catch(function(err) {
-    c.innerHTML = '<div style="padding:32px;color:var(--red)">' + err.message + '</div>';
-  });
+  // Controls
+  document.getElementById('acct-threat-scan').addEventListener('click', loadAccountThreats);
+  document.getElementById('acct-threat-days').addEventListener('change', loadAccountThreats);
+  document.getElementById('acct-threat-country').addEventListener('change', loadAccountThreats);
+
+  // Global view button
+  document.getElementById('acct-threat-global').addEventListener('click', function() { location.hash = '#/threats'; });
 }
 
 // ── Competitive Intel Tab (full product catalog) ──────────────────

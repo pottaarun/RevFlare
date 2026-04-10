@@ -86,6 +86,26 @@ body::before {
 
 #app { position: relative; z-index: 1; }
 
+/* ── Platform Bar ──────────────────────────────────────────────── */
+.platform-bar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 5px 32px;
+  font-size: 10.5px;
+  font-weight: 500;
+  background: linear-gradient(180deg, rgba(94,106,210,0.04) 0%, transparent 100%);
+  border-bottom: 1px solid rgba(255,255,255,0.03);
+  letter-spacing: 0;
+}
+.platform-sep {
+  width: 1px;
+  height: 10px;
+  background: rgba(255,255,255,0.06);
+  flex-shrink: 0;
+}
+
 /* ── Nav ────────────────────────────────────────────────────────── */
 #nav {
   position: sticky;
@@ -97,13 +117,13 @@ body::before {
   border-bottom: 1px solid var(--border-glass);
 }
 .nav-inner {
-  max-width: 1320px;
+  max-width: 1440px;
   margin: 0 auto;
-  padding: 0 32px;
-  height: 56px;
+  padding: 0 24px;
+  height: 52px;
   display: flex;
   align-items: center;
-  gap: 32px;
+  gap: 20px;
 }
 .nav-brand {
   display: flex;
@@ -121,30 +141,54 @@ body::before {
   color: var(--accent-bright);
   filter: drop-shadow(0 0 8px rgba(124,127,255,0.4));
 }
-.nav-links { display: flex; gap: 2px; }
+.nav-links { display: flex; align-items: center; gap: 0; }
 .nav-link {
   color: var(--text-muted);
   text-decoration: none;
-  font-size: 13px;
+  font-size: 12.5px;
   font-weight: 500;
-  padding: 7px 14px;
+  padding: 6px 10px;
   border-radius: var(--radius-sm);
   transition: all var(--transition-fast);
   letter-spacing: -0.1px;
+  white-space: nowrap;
 }
 .nav-link:hover { color: var(--text-secondary); background: var(--glass-hover); }
 .nav-link.active {
   color: var(--text-primary);
   background: var(--glass-active);
 }
+.nav-sep {
+  width: 1px;
+  height: 16px;
+  background: var(--border-glass);
+  margin: 0 6px;
+  flex-shrink: 0;
+}
+.nav-badge {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: #f87171;
+  color: #fff;
+  font-size: 9px;
+  font-weight: 700;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: 9px;
+  margin-left: 4px;
+  vertical-align: middle;
+}
 .nav-right {
   margin-left: auto;
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
+  flex-shrink: 0;
 }
 .nav-stat {
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
   color: var(--text-muted);
   padding: 4px 10px;

@@ -80,6 +80,12 @@ function navigate(){
   if(h==='#/upload')renderUpload(m);
   else if(h==='#/threats')renderGlobalThreats(m);
   else if(h==='#/campaigns')renderCampaigns(m);
+  else if(h==='#/pipeline')renderPipeline(m);
+  else if(h==='#/lead-scores')renderLeadScores(m);
+  else if(h==='#/alerts')renderAlerts(m);
+  else if(h==='#/team')renderTeamDashboard(m);
+  else if(h==='#/playbooks')renderPlaybooks(m);
+  else if(h.startsWith('#/search/'))renderSearch(m,decodeURIComponent(h.split('/').slice(2).join('/')));
   else if(h.startsWith('#/campaign/'))renderCampaignDetail(m,h.split('/')[2]);
   else if(h.startsWith('#/share/'))renderShareView(m,h.split('/')[2]);
   else if(h.startsWith('#/account/'))renderAccount(m,h.split('/')[2]);
@@ -361,6 +367,7 @@ async function renderAccount(c,id){
         <button class="tab" data-t="threats">Threat Intel</button>
         <button class="tab" data-t="competitive">Competitive Intel</button>
         <button class="tab" data-t="messaging">Email Composer</button>
+        <button class="tab" data-t="advanced">Advanced</button>
         <button class="tab" data-t="history">History</button>
       </div>
       <div id="tc"></div>
@@ -392,7 +399,7 @@ async function renderAccount(c,id){
   }catch(e){c.innerHTML=`<div class="empty-state"><p style="color:var(--red)">${e.message}</p><a href="#/" class="btn btn-ghost" style="margin-top:16px">Back</a></div>`;}
 }
 
-function renderTab(a){const c=$('#tc');switch(S.activeTab){case'overview':tabOverview(c,a);break;case'research':tabResearch(c,a);break;case'threats':tabThreats(c,a);break;case'competitive':tabCompetitive(c,a);break;case'messaging':tabMessaging(c,a);break;case'history':tabHistory(c,a);break;}}
+function renderTab(a){const c=$('#tc');switch(S.activeTab){case'overview':tabOverview(c,a);break;case'research':tabResearch(c,a);break;case'threats':tabThreats(c,a);break;case'competitive':tabCompetitive(c,a);break;case'messaging':tabMessaging(c,a);break;case'advanced':tabAdvanced(c,a);break;case'history':tabHistory(c,a);break;}}
 
 // ── Overview Tab ───────────────────────────────────────────────────
 function tabOverview(c,a){
@@ -1967,6 +1974,881 @@ function showGmailSetupWizard() {
 
   // Close on overlay click
   overlay.addEventListener('click', function(e) { if (e.target === overlay) overlay.remove(); });
+}
+
+// ══════════════════════════════════════════════════════════════════
+// LEAD SCORES PAGE
+// ══════════════════════════════════════════════════════════════════
+function renderLeadScores(c) {
+  c.innerHTML = '<div class="loading-state"><div class="spinner"></div>Calculating lead scores...</div>';
+
+  api.get('/lead-scores?limit=50').then(function(scored) {
+    var h = '<div class="fade-in">';
+    h += '<div class="page-header"><h1 class="page-title">Lead Scoring Leaderboard</h1>';
+    h += '<p class="page-subtitle">AI-calculated scores based on IT spend, wallet penetration, competitive displacement opportunity, engagement signals, and growth indicators.</p></div>';
+
+    // Top stats
+    var avg = scored.length ? Math.round(scored.reduce(function(s,a){return s+a.score},0)/scored.length) : 0;
+    var hot = scored.filter(function(a){return a.score >= 75}).length;
+    var warm = scored.filter(function(a){return a.score >= 50 && a.score < 75}).length;
+    h += '<div class="stats-row">';
+    h += '<div class="stat-card sc-pipeline"><div class="stat-icon">\u{1F525}</div><div class="stat-label">Hot Leads</div><div class="stat-value" style="color:#fb923c">' + hot + '</div><div class="stat-sub">Score 75+</div></div>';
+    h += '<div class="stat-card sc-avg"><div class="stat-icon">\u{1F321}</div><div class="stat-label">Warm Leads</div><div class="stat-value" style="color:#fcd34d">' + warm + '</div><div class="stat-sub">Score 50-74</div></div>';
+    h += '<div class="stat-card sc-accounts"><div class="stat-icon">\u{1F4CA}</div><div class="stat-label">Avg Score</div><div class="stat-value" style="color:#93bbfd">' + avg + '</div><div class="stat-sub">Across ' + scored.length + ' accounts</div></div>';
+    h += '</div>';
+
+    // Leaderboard
+    h += '<div class="table-wrap"><div class="table-scroll"><table><thead><tr>';
+    h += '<th style="width:40px">#</th><th>Account</th><th>Industry</th><th>Score</th><th>IT Spend</th><th>CF MRR</th><th>Top Factors</th><th></th>';
+    h += '</tr></thead><tbody>';
+
+    for (var i = 0; i < scored.length; i++) {
+      var a = scored[i];
+      var barColor = a.score >= 75 ? '#34d399' : a.score >= 50 ? '#fbbf24' : a.score >= 25 ? '#60a5fa' : '#5a5e66';
+      var factors = (a.factors || []).slice(0, 3).map(function(f) {
+        return '<span style="font-size:10px;padding:2px 6px;background:rgba(255,255,255,0.04);border:1px solid var(--border-glass);border-radius:var(--radius-sm);color:var(--text-muted)">' + f.factor + ' +' + f.points + '</span>';
+      }).join(' ');
+
+      h += '<tr>';
+      h += '<td style="font-size:14px;font-weight:800;color:' + barColor + '">' + (i+1) + '</td>';
+      h += '<td><a href="#/account/' + a.id + '" class="row-link">' + a.account_name + '</a></td>';
+      h += '<td style="font-size:12px;color:var(--text-muted)">' + (a.industry || '--') + '</td>';
+      h += '<td><div style="display:flex;align-items:center;gap:8px"><span style="font-size:16px;font-weight:800;color:' + barColor + ';min-width:32px">' + a.score + '</span><div style="flex:1;height:6px;background:rgba(255,255,255,0.04);border-radius:3px;min-width:60px;overflow:hidden"><div style="height:100%;width:' + a.score + '%;background:' + barColor + ';border-radius:3px"></div></div></div></td>';
+      h += '<td style="font-weight:600">' + fmtD(a.total_it_spend) + '</td>';
+      h += '<td style="color:var(--green);font-weight:700">' + fmtD(a.current_monthly_fee) + '</td>';
+      h += '<td style="display:flex;flex-wrap:wrap;gap:3px">' + factors + '</td>';
+      h += '<td><a href="#/account/' + a.id + '" class="btn btn-ghost btn-sm" style="font-size:11px">View</a></td>';
+      h += '</tr>';
+    }
+    h += '</tbody></table></div></div></div>';
+    c.innerHTML = h;
+  }).catch(function(err) {
+    c.innerHTML = '<div style="padding:32px;color:var(--red)">' + err.message + '</div>';
+  });
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ALERTS PAGE
+// ══════════════════════════════════════════════════════════════════
+function renderAlerts(c) {
+  c.innerHTML = '<div class="loading-state"><div class="spinner"></div>Loading alerts...</div>';
+
+  api.get('/alerts').then(function(alerts) {
+    var h = '<div class="fade-in">';
+    h += '<div class="page-header"><div class="page-header-row"><div><h1 class="page-title">Alerts & Notifications</h1>';
+    h += '<p class="page-subtitle">Infrastructure changes, threat matches, and other signals detected across your accounts.</p></div>';
+    var unread = alerts.filter(function(a){return !a.read}).length;
+    if (unread) h += '<span class="pill pill-churned" style="font-size:12px;padding:6px 14px">' + unread + ' unread</span>';
+    h += '</div></div>';
+
+    if (!alerts.length) {
+      h += '<div class="empty-state"><div class="empty-icon">' + IC.alert + '</div><h2 class="page-title" style="font-size:22px">No alerts yet</h2><p class="page-subtitle">Alerts appear when infrastructure changes or threat matches are detected. Run a change detection scan from any account, or wait for the nightly cron.</p></div>';
+      c.innerHTML = h + '</div>';
+      return;
+    }
+
+    for (var i = 0; i < alerts.length; i++) {
+      var a = alerts[i];
+      var sevColor = a.severity === 'critical' ? '#f87171' : a.severity === 'high' ? '#fb923c' : '#fbbf24';
+      var readStyle = a.read ? 'opacity:0.5;' : '';
+      var typeIcon = a.alert_type === 'threat_match' ? IC.shield : a.alert_type === 'cdn_change' ? IC.zap : a.alert_type === 'dns_change' ? IC.globe : IC.alert;
+
+      h += '<div class="d-card" style="margin-bottom:10px;border-color:' + sevColor + '20;' + readStyle + '">';
+      h += '<div style="display:flex;align-items:flex-start;gap:12px">';
+      h += '<div style="color:' + sevColor + ';flex-shrink:0;margin-top:2px">' + typeIcon + '</div>';
+      h += '<div style="flex:1">';
+      h += '<div style="display:flex;align-items:center;gap:8px">';
+      if (!a.read) h += '<span style="width:8px;height:8px;border-radius:50%;background:' + sevColor + ';flex-shrink:0"></span>';
+      h += '<span style="font-size:13px;font-weight:700;color:var(--text-primary)">' + (a.title || '') + '</span>';
+      h += '<span class="pill" style="font-size:9px;padding:1px 6px;background:' + sevColor + '15;color:' + sevColor + '">' + (a.severity || 'medium') + '</span>';
+      h += '</div>';
+      if (a.detail) h += '<div style="font-size:12px;color:var(--text-muted);margin-top:4px">' + a.detail + '</div>';
+      h += '<div style="font-size:11px;color:var(--text-muted);margin-top:6px">' + (a.alert_type || '').replace(/_/g, ' ') + ' &middot; ' + timeAgo(a.created_at) + '</div>';
+      h += '</div>';
+      if (!a.read) h += '<button class="btn btn-ghost btn-sm mark-read-btn" data-id="' + a.id + '" style="font-size:10px;flex-shrink:0">Mark read</button>';
+      h += '</div></div>';
+    }
+    h += '</div>';
+    c.innerHTML = h;
+
+    // Mark read handlers
+    var readBtns = document.querySelectorAll('.mark-read-btn');
+    for (var i = 0; i < readBtns.length; i++) {
+      (function(btn) {
+        btn.addEventListener('click', function() {
+          api.post('/alerts/' + btn.getAttribute('data-id') + '/read', {}).then(function() {
+            btn.closest('.d-card').style.opacity = '0.5';
+            btn.remove();
+            var badge = document.getElementById('alert-badge');
+            if (badge) { var n = parseInt(badge.textContent || '0') - 1; if (n <= 0) badge.style.display = 'none'; else badge.textContent = n; }
+          });
+        });
+      })(readBtns[i]);
+    }
+  }).catch(function(err) {
+    c.innerHTML = '<div style="padding:32px;color:var(--red)">' + err.message + '</div>';
+  });
+}
+
+// ══════════════════════════════════════════════════════════════════
+// TEAM DASHBOARD
+// ══════════════════════════════════════════════════════════════════
+function renderTeamDashboard(c) {
+  c.innerHTML = '<div class="loading-state"><div class="spinner"></div>Loading team stats...</div>';
+
+  api.get('/team-stats').then(function(data) {
+    var h = '<div class="fade-in">';
+    h += '<div class="page-header"><h1 class="page-title">Team Dashboard</h1>';
+    h += '<p class="page-subtitle">Activity and performance metrics across all RevFlare users.</p></div>';
+
+    h += '<div class="stats-row">';
+    h += '<div class="stat-card sc-accounts"><div class="stat-icon">\u{1F465}</div><div class="stat-label">Team Members</div><div class="stat-value" style="color:#93bbfd">' + (data.users || []).length + '</div><div class="stat-sub">Active users</div></div>';
+    var totalEmails = (data.emailsByUser || []).reduce(function(s,u){return s+(u.cnt||0)},0);
+    h += '<div class="stat-card sc-revenue"><div class="stat-icon">\u{1F4E7}</div><div class="stat-label">Total Emails</div><div class="stat-value" style="color:#6ee7b7">' + totalEmails + '</div><div class="stat-sub">Generated across team</div></div>';
+    var totalResearch = (data.researchByUser || []).reduce(function(s,u){return s+(u.cnt||0)},0);
+    h += '<div class="stat-card sc-spend"><div class="stat-icon">\u{1F50D}</div><div class="stat-label">Research Reports</div><div class="stat-value" style="color:#c4b5fd">' + totalResearch + '</div><div class="stat-sub">Generated across team</div></div>';
+    var totalAcv = (data.opportunitiesByUser || []).reduce(function(s,u){return s+(u.total_acv||0)},0);
+    h += '<div class="stat-card sc-pipeline"><div class="stat-icon">\u{1F4B0}</div><div class="stat-label">Total Pipeline ACV</div><div class="stat-value" style="color:#fdba74">' + fmtD(totalAcv) + '</div><div class="stat-sub">From all opps</div></div>';
+    h += '</div>';
+
+    // Leaderboard
+    h += '<div class="persona-section-title" style="margin-top:12px">Activity Leaderboard</div>';
+    h += '<div class="table-wrap"><div class="table-scroll"><table><thead><tr>';
+    h += '<th>User</th><th>Emails</th><th>Research</th><th>Campaigns</th><th>Pipeline ACV</th>';
+    h += '</tr></thead><tbody>';
+
+    var userMap = {};
+    (data.users || []).forEach(function(u) { userMap[u.user_email] = { email: u.user_email, emails: 0, research: 0, campaigns: 0, acv: 0 }; });
+    (data.emailsByUser || []).forEach(function(u) { if (userMap[u.user_email]) userMap[u.user_email].emails = u.cnt; });
+    (data.researchByUser || []).forEach(function(u) { if (userMap[u.user_email]) userMap[u.user_email].research = u.cnt; });
+    (data.campaignsByUser || []).forEach(function(u) { if (userMap[u.user_email]) userMap[u.user_email].campaigns = u.cnt; });
+    (data.opportunitiesByUser || []).forEach(function(u) { if (userMap[u.user_email]) userMap[u.user_email].acv = u.total_acv || 0; });
+
+    var users = Object.values(userMap).sort(function(a,b) { return (b.emails + b.research*2) - (a.emails + a.research*2); });
+    for (var i = 0; i < users.length; i++) {
+      var u = users[i];
+      var name = u.email.split('@')[0].replace(/[._]/g, ' ');
+      h += '<tr>';
+      h += '<td style="font-weight:600;color:var(--text-primary)">' + name + ' <span style="font-size:10px;color:var(--text-muted)">' + u.email + '</span></td>';
+      h += '<td style="color:var(--green);font-weight:700">' + u.emails + '</td>';
+      h += '<td style="color:var(--blue);font-weight:700">' + u.research + '</td>';
+      h += '<td style="font-weight:600">' + u.campaigns + '</td>';
+      h += '<td style="color:var(--amber);font-weight:700">' + fmtD(u.acv) + '</td>';
+      h += '</tr>';
+    }
+    if (!users.length) h += '<tr><td colspan="5" style="text-align:center;padding:32px;color:var(--text-muted)">No team data yet</td></tr>';
+    h += '</tbody></table></div></div></div>';
+    c.innerHTML = h;
+  }).catch(function(err) {
+    c.innerHTML = '<div style="padding:32px;color:var(--red)">' + err.message + '</div>';
+  });
+}
+
+// ══════════════════════════════════════════════════════════════════
+// PIPELINE (Opportunities + ACV Tracking)
+// ══════════════════════════════════════════════════════════════════
+function renderPipeline(c) {
+  c.innerHTML = '<div class="loading-state"><div class="spinner"></div>Loading pipeline...</div>';
+
+  Promise.all([api.get('/opportunities'), api.get('/acv')]).then(function(res) {
+    var opps = res[0] || [];
+    var acv = res[1] || {};
+
+    var h = '<div class="fade-in">';
+    h += '<div class="page-header"><div class="page-header-row"><div><h1 class="page-title">Pipeline & Opportunities</h1>';
+    h += '<p class="page-subtitle">Track deals, ACV, and pipeline progression across your accounts.</p></div>';
+    h += '<div style="display:flex;gap:8px;align-items:center">';
+    h += '<button class="btn btn-accent-ghost" id="agent-opp-btn">' + IC.sparkles + ' Auto-Generate</button>';
+    h += '<button class="btn btn-primary" id="add-opp-btn">' + IC.dollar + ' New Opportunity</button>';
+    h += '</div></div></div>';
+    h += '<div id="agent-output" style="margin-bottom:24px"></div>';
+
+    // ACV stats
+    h += '<div class="stats-row">';
+    h += '<div class="stat-card sc-revenue"><div class="stat-icon">\u{1F4B0}</div><div class="stat-label">Total ACV</div><div class="stat-value" style="color:#6ee7b7">' + fmtD(acv.totalAcv || 0) + '</div><div class="stat-sub">' + opps.length + ' opportunities</div></div>';
+
+    var stages = acv.byStage || [];
+    for (var i = 0; i < Math.min(stages.length, 4); i++) {
+      var st = stages[i];
+      var stColors = {prospecting:'#60a5fa',qualification:'#a78bfa',proposal:'#fbbf24',negotiation:'#fb923c',closed_won:'#34d399',closed_lost:'#f87171'};
+      var stColor = stColors[st.stage] || '#8a8f98';
+      h += '<div class="stat-card" style="background:linear-gradient(135deg,' + stColor + '14,' + stColor + '04);border:1px solid ' + stColor + '25"><div class="stat-icon" style="background:' + stColor + '20;color:' + stColor + '">' + st.cnt + '</div><div class="stat-label">' + (st.stage || 'unknown').replace(/_/g,' ') + '</div><div class="stat-value" style="color:' + stColor + '">' + fmtD(st.total || 0) + '</div><div class="stat-sub">' + st.cnt + ' deals</div></div>';
+    }
+    h += '</div>';
+
+    // Country breakdown
+    if ((acv.byCountry || []).length) {
+      h += '<div class="d-card" style="margin-bottom:24px"><div class="d-card-title">' + IC.globe + ' ACV by Country</div>';
+      var maxAcv = Math.max.apply(null, acv.byCountry.map(function(c){return c.total||0}));
+      for (var i = 0; i < acv.byCountry.length; i++) {
+        var cc = acv.byCountry[i];
+        h += '<div class="d-row"><span class="d-row-label">' + cc.country + '</span><div style="display:flex;align-items:center;gap:10px;flex:1;justify-content:flex-end"><div style="height:6px;border-radius:3px;background:rgba(52,211,153,0.15);flex:1;max-width:200px;overflow:hidden"><div style="height:100%;background:#34d399;border-radius:3px;width:' + ((cc.total/maxAcv)*100).toFixed(0) + '%"></div></div><span class="d-row-value" style="color:var(--green)">' + fmtD(cc.total) + '</span></div></div>';
+      }
+      h += '</div>';
+    }
+
+    // Opportunities table
+    h += '<div class="persona-section-title">All Opportunities</div>';
+    if (!opps.length) {
+      h += '<div style="text-align:center;padding:48px 0;color:var(--text-muted)">' + IC.dollar + '<p style="margin-top:12px">No opportunities yet. Click "New Opportunity" to add one.</p></div>';
+    } else {
+      h += '<div class="table-wrap"><div class="table-scroll"><table><thead><tr>';
+      h += '<th>Account</th><th>Stage</th><th>ACV</th><th>Industry</th><th>Country</th><th>Notes</th><th>Created</th><th></th>';
+      h += '</tr></thead><tbody>';
+      for (var i = 0; i < opps.length; i++) {
+        var o = opps[i];
+        var stageColors = {prospecting:'var(--blue)',qualification:'var(--accent-bright)',proposal:'var(--amber)',negotiation:'#fb923c',closed_won:'var(--green)',closed_lost:'var(--red)'};
+        var sc = stageColors[o.stage] || 'var(--text-muted)';
+        h += '<tr>';
+        h += '<td style="font-weight:600;color:var(--text-primary)">' + (o.account_name || '--') + '</td>';
+        h += '<td><span class="pill" style="background:' + sc + '15;color:' + sc + '">' + (o.stage || '').replace(/_/g,' ') + '</span></td>';
+        h += '<td style="color:var(--green);font-weight:700">' + fmtD(o.acv) + '</td>';
+        h += '<td style="font-size:12px;color:var(--text-muted)">' + (o.industry || '--') + '</td>';
+        h += '<td style="font-size:12px;color:var(--text-muted)">' + (o.country || '--') + '</td>';
+        h += '<td style="font-size:12px;color:var(--text-muted);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + (o.notes || '--') + '</td>';
+        h += '<td style="font-size:12px;color:var(--text-muted)">' + timeAgo(o.created_at) + '</td>';
+        h += '<td><button class="btn btn-ghost btn-sm delete-opp-btn" data-id="' + o.id + '" style="font-size:10px;color:var(--red)">Delete</button></td>';
+        h += '</tr>';
+      }
+      h += '</tbody></table></div></div>';
+    }
+
+    // Add opportunity form (hidden)
+    h += '<div id="opp-form" style="display:none;margin-top:24px">';
+    h += '<div class="d-card"><div class="d-card-title">' + IC.dollar + ' New Opportunity</div>';
+    h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">';
+    h += '<div><label class="context-label">Account Name</label><input type="text" class="search-input" id="opp-name" placeholder="Company name" style="padding-left:14px" /></div>';
+    h += '<div><label class="context-label">ACV ($)</label><input type="number" class="search-input" id="opp-acv" placeholder="100000" style="padding-left:14px" /></div>';
+    h += '<div><label class="context-label">Stage</label><select class="filter-select" id="opp-stage" style="width:100%"><option value="prospecting">Prospecting</option><option value="qualification">Qualification</option><option value="proposal">Proposal</option><option value="negotiation">Negotiation</option><option value="closed_won">Closed Won</option><option value="closed_lost">Closed Lost</option></select></div>';
+    h += '<div><label class="context-label">Industry</label><input type="text" class="search-input" id="opp-industry" placeholder="e.g. Financial Services" style="padding-left:14px" /></div>';
+    h += '<div><label class="context-label">Country</label><input type="text" class="search-input" id="opp-country" placeholder="e.g. US" style="padding-left:14px" /></div>';
+    h += '<div><label class="context-label">Notes</label><input type="text" class="search-input" id="opp-notes" placeholder="Key details..." style="padding-left:14px" /></div>';
+    h += '</div>';
+    h += '<div style="display:flex;gap:8px;margin-top:16px"><button class="btn btn-primary" id="save-opp-btn">' + IC.dollar + ' Save Opportunity</button><button class="btn btn-ghost" id="cancel-opp-btn">Cancel</button></div>';
+    h += '</div></div>';
+
+    h += '</div>';
+    c.innerHTML = h;
+
+    // Add opportunity button
+    document.getElementById('add-opp-btn').addEventListener('click', function() {
+      document.getElementById('opp-form').style.display = 'block';
+      document.getElementById('opp-form').scrollIntoView({ behavior: 'smooth' });
+    });
+    document.getElementById('cancel-opp-btn').addEventListener('click', function() {
+      document.getElementById('opp-form').style.display = 'none';
+    });
+    document.getElementById('save-opp-btn').addEventListener('click', function() {
+      var btn = this;
+      btn.disabled = true;
+      btn.textContent = 'Saving...';
+      api.post('/opportunities', {
+        account_name: document.getElementById('opp-name').value,
+        acv: parseFloat(document.getElementById('opp-acv').value) || 0,
+        stage: document.getElementById('opp-stage').value,
+        industry: document.getElementById('opp-industry').value,
+        country: document.getElementById('opp-country').value,
+        notes: document.getElementById('opp-notes').value,
+      }).then(function() {
+        toast('Opportunity saved', 'success');
+        renderPipeline(document.getElementById('main'));
+      }).catch(function(e) { toast(e.message, 'error'); btn.disabled = false; btn.textContent = 'Save Opportunity'; });
+    });
+
+    // Delete handlers
+    var delBtns = document.querySelectorAll('.delete-opp-btn');
+    for (var i = 0; i < delBtns.length; i++) {
+      (function(btn) {
+        btn.addEventListener('click', function() {
+          if (!confirm('Delete this opportunity?')) return;
+          fetch('/api/opportunities/' + btn.getAttribute('data-id'), { method: 'DELETE' }).then(function() {
+            toast('Deleted', 'success');
+            renderPipeline(document.getElementById('main'));
+          });
+        });
+      })(delBtns[i]);
+    }
+
+    // AI Agent: Auto-generate opportunities
+    document.getElementById('agent-opp-btn').addEventListener('click', function() {
+      var btn = this;
+      btn.disabled = true;
+      btn.innerHTML = '<div class="spinner" style="width:12px;height:12px;border-width:2px;display:inline-block;vertical-align:middle;margin-right:6px"></div> Agent analyzing...';
+
+      var agentOut = document.getElementById('agent-output');
+      agentOut.innerHTML = '<div class="d-card" style="border-color:var(--border-accent);overflow:hidden">'
+        + '<div style="display:flex;align-items:center;gap:14px;padding:0 0 16px">'
+        + '<div class="ai-pulse" style="width:40px;height:40px;flex-shrink:0">' + IC.sparkles + '</div>'
+        + '<div><div style="font-size:15px;font-weight:700;color:var(--text-primary)">Opportunity Agent Running</div>'
+        + '<div style="font-size:12px;color:var(--text-muted);margin-top:2px">Scoring all accounts by IT spend, competitor stack, wallet penetration, and growth signals. Then using AI to estimate ACV and assign stages.</div></div></div>'
+        + '<div style="display:flex;flex-direction:column;gap:8px">'
+        + '<div style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--accent-bright)"><div class="spinner" style="width:10px;height:10px;border-width:1.5px;flex-shrink:0"></div> Loading accounts & computing lead scores...</div>'
+        + '<div style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text-muted)"><div style="width:10px;height:10px;flex-shrink:0"></div> Filtering candidates (score >= 30, no existing opp)...</div>'
+        + '<div style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text-muted)"><div style="width:10px;height:10px;flex-shrink:0"></div> AI analyzing top candidates for ACV & stage...</div>'
+        + '<div style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text-muted)"><div style="width:10px;height:10px;flex-shrink:0"></div> Creating opportunities in pipeline...</div>'
+        + '</div></div>';
+      agentOut.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+      api.post('/opportunities/auto-generate', { limit: 10 }).then(function(result) {
+        if (result.error) {
+          agentOut.innerHTML = '<div class="d-card" style="border-color:rgba(248,113,113,0.3)"><div style="color:var(--red);font-weight:700;margin-bottom:6px">Agent Error</div><div style="font-size:13px;color:var(--text-muted)">' + result.error + '</div></div>';
+          btn.disabled = false;
+          btn.innerHTML = IC.sparkles + ' Auto-Generate';
+          return;
+        }
+
+        var created = result.created || [];
+        var rh = '<div class="d-card slide-up" style="border-color:rgba(52,211,153,0.2)">';
+        rh += '<div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">';
+        rh += '<div style="width:36px;height:36px;border-radius:var(--radius-md);background:rgba(52,211,153,0.1);color:var(--green);display:flex;align-items:center;justify-content:center;font-size:18px">' + IC.sparkles + '</div>';
+        rh += '<div><div style="font-size:15px;font-weight:700;color:var(--green)">Agent Created ' + result.totalCreated + ' Opportunities</div>';
+        rh += '<div style="font-size:12px;color:var(--text-muted)">Analyzed ' + result.totalAnalyzed + ' candidate accounts. ' + (result.message || '') + '</div></div></div>';
+
+        if (created.length) {
+          rh += '<table style="width:100%"><thead><tr><th>Account</th><th>Stage</th><th>ACV</th><th>Score</th><th>AI Notes</th></tr></thead><tbody>';
+          var totalAcv = 0;
+          for (var i = 0; i < created.length; i++) {
+            var o = created[i];
+            totalAcv += o.acv || 0;
+            var stageColors = {prospecting:'var(--blue)',qualification:'var(--accent-bright)',proposal:'var(--amber)',negotiation:'#fb923c',closed_won:'var(--green)'};
+            var sc = stageColors[o.stage] || 'var(--text-muted)';
+            rh += '<tr>';
+            rh += '<td style="font-weight:600;color:var(--text-primary)">' + o.account_name + ' <span style="font-size:10px;color:var(--text-muted)">' + (o.industry || '') + '</span></td>';
+            rh += '<td><span class="pill" style="background:' + sc + '15;color:' + sc + '">' + o.stage.replace(/_/g, ' ') + '</span></td>';
+            rh += '<td style="color:var(--green);font-weight:700">' + fmtD(o.acv) + '</td>';
+            rh += '<td style="font-weight:700;color:' + (o.leadScore >= 75 ? '#34d399' : o.leadScore >= 50 ? '#fbbf24' : '#60a5fa') + '">' + o.leadScore + '</td>';
+            rh += '<td style="font-size:12px;color:var(--text-muted);max-width:300px">' + (o.notes || '') + '</td>';
+            rh += '</tr>';
+          }
+          rh += '</tbody></table>';
+          rh += '<div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border-glass);display:flex;align-items:center;justify-content:space-between">';
+          rh += '<span style="font-size:13px;color:var(--text-muted)">Total new pipeline ACV: <strong style="color:var(--green);font-size:16px">' + fmtD(totalAcv) + '</strong></span>';
+          rh += '<button class="btn btn-primary btn-sm" id="refresh-pipeline-btn">' + IC.zap + ' Refresh Pipeline</button>';
+          rh += '</div>';
+        } else {
+          rh += '<div style="padding:16px 0;text-align:center;color:var(--text-muted);font-size:13px">No new opportunities to create — all eligible accounts already have one, or none met the scoring threshold.</div>';
+        }
+        rh += '</div>';
+        agentOut.innerHTML = rh;
+
+        btn.disabled = false;
+        btn.innerHTML = IC.sparkles + ' Auto-Generate';
+
+        var refreshBtn = document.getElementById('refresh-pipeline-btn');
+        if (refreshBtn) {
+          refreshBtn.addEventListener('click', function() {
+            renderPipeline(document.getElementById('main'));
+          });
+        }
+      }).catch(function(err) {
+        agentOut.innerHTML = '<div class="d-card" style="border-color:rgba(248,113,113,0.3)"><div style="color:var(--red);font-weight:700;margin-bottom:6px">Agent Failed</div><div style="font-size:13px;color:var(--text-muted)">' + (err.message || err) + '</div></div>';
+        btn.disabled = false;
+        btn.innerHTML = IC.sparkles + ' Auto-Generate';
+      });
+    });
+  }).catch(function(err) {
+    c.innerHTML = '<div style="padding:32px;color:var(--red)">' + err.message + '</div>';
+  });
+}
+
+// ══════════════════════════════════════════════════════════════════
+// PLAYBOOKS
+// ══════════════════════════════════════════════════════════════════
+function renderPlaybooks(c) {
+  c.innerHTML = '<div class="loading-state"><div class="spinner"></div>Loading playbooks...</div>';
+
+  api.get('/playbooks').then(function(playbooks) {
+    var h = '<div class="fade-in">';
+    h += '<div class="page-header"><div class="page-header-row"><div><h1 class="page-title">Sales Playbooks</h1>';
+    h += '<p class="page-subtitle">Reusable templates for common sales scenarios. Create playbooks and track how often they are used by the team.</p></div>';
+    h += '<button class="btn btn-primary" id="add-pb-btn">' + IC.sparkles + ' New Playbook</button>';
+    h += '</div></div>';
+
+    if (!playbooks.length) {
+      h += '<div class="empty-state"><div class="empty-icon">' + IC.target + '</div><h2 class="page-title" style="font-size:22px">No playbooks yet</h2><p class="page-subtitle">Create your first playbook to share proven sales strategies with the team.</p></div>';
+    } else {
+      h += '<div class="research-grid">';
+      for (var i = 0; i < playbooks.length; i++) {
+        var pb = playbooks[i];
+        var personaColor = PERSONA_META[pb.persona] ? PERSONA_META[pb.persona].color : 'var(--accent-bright)';
+        h += '<div class="d-card" style="cursor:pointer" data-pb-id="' + pb.id + '">';
+        h += '<div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">';
+        h += '<div style="width:36px;height:36px;border-radius:var(--radius-md);background:' + personaColor + '15;color:' + personaColor + ';display:flex;align-items:center;justify-content:center;font-size:16px">' + (PERSONA_META[pb.persona] ? PERSONA_META[pb.persona].icon : IC.target) + '</div>';
+        h += '<div><div style="font-size:14px;font-weight:700;color:var(--text-primary)">' + pb.name + '</div>';
+        h += '<div style="font-size:11px;color:var(--text-muted)">' + (pb.persona || '').toUpperCase() + (pb.industry ? ' &middot; ' + pb.industry : '') + '</div></div>';
+        h += '<span style="margin-left:auto;font-size:11px;color:var(--text-muted);background:var(--glass);border:1px solid var(--border-glass);padding:3px 8px;border-radius:var(--radius-pill)">' + (pb.usage_count || 0) + ' uses</span>';
+        h += '</div>';
+        h += '<div style="font-size:12px;color:var(--text-tertiary);line-height:1.6;max-height:80px;overflow:hidden">' + (pb.template || '').slice(0, 200) + '</div>';
+        h += '<div style="margin-top:12px"><button class="btn btn-accent-ghost btn-sm use-pb-btn" data-id="' + pb.id + '">' + IC.sparkles + ' Use Playbook</button></div>';
+        h += '</div>';
+      }
+      h += '</div>';
+    }
+
+    // Create playbook form
+    h += '<div id="pb-form" style="display:none;margin-top:24px">';
+    h += '<div class="d-card"><div class="d-card-title">' + IC.target + ' New Playbook</div>';
+    h += '<div style="display:grid;gap:12px">';
+    h += '<div><label class="context-label">Playbook Name</label><input type="text" class="search-input" id="pb-name" placeholder="e.g. Competitive Displacement - Akamai" style="padding-left:14px" /></div>';
+    h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">';
+    h += '<div><label class="context-label">Persona</label><select class="filter-select" id="pb-persona" style="width:100%"><option value="bdr">BDR</option><option value="ae">AE</option><option value="csm">CSM</option><option value="se">SE</option><option value="vp_sales">VP Sales</option></select></div>';
+    h += '<div><label class="context-label">Industry (optional)</label><input type="text" class="search-input" id="pb-industry" placeholder="e.g. Financial Services" style="padding-left:14px" /></div>';
+    h += '</div>';
+    h += '<div><label class="context-label">Playbook Template</label><textarea class="context-area" id="pb-template" placeholder="Write your playbook template... Include talk tracks, objection handling, key value props, pricing guidance, etc." style="min-height:160px"></textarea></div>';
+    h += '</div>';
+    h += '<div style="display:flex;gap:8px;margin-top:12px"><button class="btn btn-primary" id="save-pb-btn">' + IC.sparkles + ' Create Playbook</button><button class="btn btn-ghost" id="cancel-pb-btn">Cancel</button></div>';
+    h += '</div></div>';
+
+    // Playbook detail viewer
+    h += '<div id="pb-detail" style="margin-top:24px"></div>';
+    h += '</div>';
+    c.innerHTML = h;
+
+    // Handlers
+    document.getElementById('add-pb-btn').addEventListener('click', function() {
+      document.getElementById('pb-form').style.display = 'block';
+      document.getElementById('pb-form').scrollIntoView({ behavior: 'smooth' });
+    });
+    document.getElementById('cancel-pb-btn').addEventListener('click', function() {
+      document.getElementById('pb-form').style.display = 'none';
+    });
+    document.getElementById('save-pb-btn').addEventListener('click', function() {
+      var btn = this;
+      var name = document.getElementById('pb-name').value.trim();
+      var template = document.getElementById('pb-template').value.trim();
+      if (!name || !template) { toast('Name and template are required', 'error'); return; }
+      btn.disabled = true;
+      api.post('/playbooks', {
+        name: name,
+        persona: document.getElementById('pb-persona').value,
+        industry: document.getElementById('pb-industry').value,
+        template: template,
+      }).then(function() { toast('Playbook created', 'success'); renderPlaybooks(document.getElementById('main')); })
+        .catch(function(e) { toast(e.message, 'error'); btn.disabled = false; });
+    });
+
+    // Use playbook
+    var useBtns = document.querySelectorAll('.use-pb-btn');
+    for (var i = 0; i < useBtns.length; i++) {
+      (function(btn) {
+        btn.addEventListener('click', function(e) {
+          e.stopPropagation();
+          btn.disabled = true;
+          btn.textContent = 'Loading...';
+          api.post('/playbooks/' + btn.getAttribute('data-id') + '/use', {}).then(function(pb) {
+            var detail = document.getElementById('pb-detail');
+            detail.innerHTML = '<div class="output-card slide-up"><div class="output-header"><div class="output-header-left"><div class="output-header-title">' + pb.name + '</div><div class="output-header-sub">' + (pb.persona || '').toUpperCase() + (pb.industry ? ' &middot; ' + pb.industry : '') + ' &middot; Used ' + pb.usage_count + ' times</div></div><button class="btn btn-ghost btn-sm" onclick="copyEl(this)">' + IC.copy + ' Copy</button></div><div class="output-body">' + md(pb.template) + '</div></div>';
+            detail.scrollIntoView({ behavior: 'smooth' });
+            btn.disabled = false;
+            btn.innerHTML = IC.sparkles + ' Use Playbook';
+          }).catch(function(e) { toast(e.message, 'error'); btn.disabled = false; btn.innerHTML = IC.sparkles + ' Use Playbook'; });
+        });
+      })(useBtns[i]);
+    }
+  }).catch(function(err) {
+    c.innerHTML = '<div style="padding:32px;color:var(--red)">' + err.message + '</div>';
+  });
+}
+
+// ══════════════════════════════════════════════════════════════════
+// SEARCH
+// ══════════════════════════════════════════════════════════════════
+function renderSearch(c, query) {
+  c.innerHTML = '<div class="loading-state"><div class="spinner"></div>Searching...</div>';
+
+  // First index, then search
+  api.post('/search/index', {}).then(function() {
+    return api.get('/search?q=' + encodeURIComponent(query));
+  }).then(function(data) {
+    var results = data.results || [];
+    var h = '<div class="fade-in">';
+    h += '<div class="page-header"><h1 class="page-title">Search Results</h1>';
+    h += '<p class="page-subtitle">Found ' + results.length + ' results for "' + query + '" across ' + data.totalIndexed + ' indexed items.</p></div>';
+
+    h += '<div class="toolbar" style="margin-bottom:24px"><div class="search-wrap">' + IC.search + '<input type="text" class="search-input" id="search-input" placeholder="Refine your search..." value="' + query.replace(/"/g, '&quot;') + '" /></div></div>';
+
+    if (!results.length) {
+      h += '<div class="empty-state"><div class="empty-icon">' + IC.search + '</div><h2 class="page-title" style="font-size:22px">No results found</h2><p class="page-subtitle">Try different keywords or generate more research/emails first.</p></div>';
+    } else {
+      for (var i = 0; i < results.length; i++) {
+        var r = results[i];
+        var typeColor = r.content_type === 'research' ? 'var(--blue)' : 'var(--green)';
+        var typeLabel = r.content_type === 'research' ? 'Research' : 'Email';
+        h += '<div class="d-card" style="margin-bottom:10px;cursor:pointer" onclick="location.hash=\'#/account/' + r.account_id + '\'">';
+        h += '<div style="display:flex;align-items:flex-start;gap:12px">';
+        h += '<span class="pill" style="background:' + typeColor + '15;color:' + typeColor + ';font-size:10px;flex-shrink:0">' + typeLabel + '</span>';
+        h += '<div style="flex:1">';
+        h += '<div style="font-size:13px;font-weight:600;color:var(--text-primary);margin-bottom:4px">' + (r.content_text || '').split(':')[0].slice(0, 80) + '</div>';
+        h += '<div style="font-size:12px;color:var(--text-muted);line-height:1.5">' + (r.content_text || '').slice(0, 200) + '</div>';
+        h += '<div style="font-size:10px;color:var(--text-muted);margin-top:6px">Relevance: ' + r.score + '</div>';
+        h += '</div></div></div>';
+      }
+    }
+    h += '</div>';
+    c.innerHTML = h;
+
+    // Re-search on enter
+    document.getElementById('search-input').addEventListener('keydown', function(e) {
+      if (e.key === 'Enter' && this.value.trim()) {
+        location.hash = '#/search/' + encodeURIComponent(this.value.trim());
+      }
+    });
+  }).catch(function(err) {
+    c.innerHTML = '<div style="padding:32px;color:var(--red)">' + err.message + '</div>';
+  });
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ADVANCED TAB (per-account: ROI, Lookalikes, Meeting Prep,
+//               Sequences, Change Detection, A/B Testing, Voice Notes)
+// ══════════════════════════════════════════════════════════════════
+function tabAdvanced(c, a) {
+  var h = '<div class="fade-in">';
+  h += '<p style="font-size:14px;color:var(--text-muted);margin-bottom:28px">Advanced tools for <strong style="color:var(--text-primary)">' + a.account_name + '</strong> &mdash; ROI analysis, lookalike accounts, meeting prep, multi-touch sequences, infrastructure change detection, A/B email testing, and voice notes.</p>';
+
+  // Feature cards grid
+  h += '<div class="research-grid" style="grid-template-columns:repeat(auto-fit,minmax(200px,1fr))">';
+
+  var features = [
+    { id: 'roi', icon: IC.dollar, title: 'ROI Calculator', desc: 'Estimate savings from migrating to Cloudflare', color: '#34d399' },
+    { id: 'lookalikes', icon: IC.target, title: 'Lookalike Accounts', desc: 'Find similar accounts by industry, size, and stack', color: '#60a5fa' },
+    { id: 'meeting-prep', icon: IC.sparkles, title: 'Meeting Prep', desc: 'AI-generated call prep with talk tracks and objections', color: '#a78bfa' },
+    { id: 'sequences', icon: IC.mail, title: 'Multi-Touch Sequences', desc: 'Generate coordinated outreach across email, phone, LinkedIn', color: '#fbbf24' },
+    { id: 'change-detect', icon: IC.zap, title: 'Change Detection', desc: 'Scan for CDN, DNS, and server infrastructure changes', color: '#fb923c' },
+    { id: 'ab-test', icon: IC.bar, title: 'A/B Email Testing', desc: 'Generate two email variants: business vs technical hook', color: '#f472b6' },
+    { id: 'voice-note', icon: IC.send, title: 'Voice Notes', desc: 'Paste call notes and get an AI follow-up email', color: '#60a5fa' },
+  ];
+
+  for (var i = 0; i < features.length; i++) {
+    var f = features[i];
+    h += '<div class="research-card adv-feature-card" data-feature="' + f.id + '" style="background:linear-gradient(135deg,' + f.color + '14,' + f.color + '04);border-color:' + f.color + '25;cursor:pointer">';
+    h += '<div class="research-card-icon" style="background:' + f.color + '20;color:' + f.color + ';border-radius:var(--radius-md)">' + f.icon + '</div>';
+    h += '<div class="research-card-title" style="color:' + f.color + '">' + f.title + '</div>';
+    h += '<div class="research-card-desc">' + f.desc + '</div>';
+    h += '</div>';
+  }
+  h += '</div>';
+  h += '<div id="adv-output" style="margin-top:28px"></div>';
+  h += '</div>';
+  c.innerHTML = h;
+
+  // Feature click handlers
+  var cards = document.querySelectorAll('.adv-feature-card');
+  for (var i = 0; i < cards.length; i++) {
+    (function(card) {
+      card.addEventListener('click', function() {
+        for (var x = 0; x < cards.length; x++) cards[x].classList.remove('selected');
+        card.classList.add('selected');
+        var feature = card.getAttribute('data-feature');
+        var out = document.getElementById('adv-output');
+        runAdvancedFeature(feature, a, out);
+      });
+    })(cards[i]);
+  }
+}
+
+function runAdvancedFeature(feature, a, out) {
+  switch (feature) {
+    case 'roi': runROI(a, out); break;
+    case 'lookalikes': runLookalikes(a, out); break;
+    case 'meeting-prep': runMeetingPrep(a, out); break;
+    case 'sequences': runSequences(a, out); break;
+    case 'change-detect': runChangeDetect(a, out); break;
+    case 'ab-test': runABTest(a, out); break;
+    case 'voice-note': runVoiceNote(a, out); break;
+  }
+}
+
+// ── ROI Calculator ────────────────────────────────────────────────
+function runROI(a, out) {
+  out.innerHTML = '<div class="loading-state"><div class="spinner"></div>Calculating ROI...</div>';
+  api.get('/roi/' + a.id).then(function(r) {
+    var h = '<div class="output-card slide-up"><div class="output-header"><div class="output-header-left">' + IC.dollar + '<div><div class="output-header-title">ROI Analysis: ' + a.account_name + '</div><div class="output-header-sub">Based on current IT spend and vendor stack</div></div></div></div>';
+    h += '<div style="padding:24px">';
+
+    h += '<div class="stats-row" style="margin-bottom:24px">';
+    h += '<div class="stat-card sc-revenue"><div class="stat-label">Estimated Annual Savings</div><div class="stat-value" style="color:#6ee7b7">' + fmtD(r.estimatedSavings || 0) + '</div></div>';
+    h += '<div class="stat-card sc-spend"><div class="stat-label">Current Annual Cost</div><div class="stat-value" style="color:#c4b5fd">' + fmtD(r.currentAnnualCost || 0) + '</div></div>';
+    h += '<div class="stat-card sc-avg"><div class="stat-label">Projected CF Cost</div><div class="stat-value" style="color:#fcd34d">' + fmtD(r.projectedCFCost || 0) + '</div></div>';
+    h += '<div class="stat-card sc-pipeline"><div class="stat-label">ROI %</div><div class="stat-value" style="color:#fdba74">' + (r.roiPercent || 0) + '%</div></div>';
+    h += '</div>';
+
+    if (r.breakdown && r.breakdown.length) {
+      h += '<div class="persona-section-title">Cost Breakdown</div>';
+      for (var i = 0; i < r.breakdown.length; i++) {
+        var b = r.breakdown[i];
+        h += '<div class="d-row"><span class="d-row-label">' + b.category + '</span><div style="display:flex;gap:12px"><span style="color:var(--text-muted)">' + fmtD(b.current) + ' /mo</span><span style="color:var(--green)">→ ' + fmtD(b.projected) + ' /mo</span><span style="font-weight:700;color:var(--green)">' + fmtD(b.savings) + ' saved</span></div></div>';
+      }
+    }
+
+    if (r.recommendations && r.recommendations.length) {
+      h += '<div class="persona-section-title" style="margin-top:24px">Recommendations</div>';
+      for (var i = 0; i < r.recommendations.length; i++) {
+        h += '<div style="padding:8px 0;font-size:13px;color:var(--text-secondary);border-bottom:1px solid rgba(255,255,255,0.03)">' + IC.zap + ' ' + r.recommendations[i] + '</div>';
+      }
+    }
+    h += '</div></div>';
+    out.innerHTML = h;
+  }).catch(function(e) { out.innerHTML = '<div style="padding:24px;color:var(--red)">' + e.message + '</div>'; });
+}
+
+// ── Lookalikes ────────────────────────────────────────────────────
+function runLookalikes(a, out) {
+  out.innerHTML = '<div class="loading-state"><div class="spinner"></div>Finding similar accounts...</div>';
+  api.get('/lookalikes/' + a.id).then(function(data) {
+    var h = '<div class="output-card slide-up"><div class="output-header"><div class="output-header-left">' + IC.target + '<div><div class="output-header-title">Lookalike Accounts for ' + a.account_name + '</div><div class="output-header-sub">' + data.lookalikes.length + ' similar accounts found</div></div></div></div>';
+    h += '<div style="padding:0">';
+    h += '<table style="width:100%"><thead><tr><th>Account</th><th>Similarity</th><th>Industry</th><th>IT Spend</th><th>CDN</th><th>Security</th><th></th></tr></thead><tbody>';
+    for (var i = 0; i < data.lookalikes.length; i++) {
+      var l = data.lookalikes[i];
+      var simColor = l.similarity >= 70 ? '#34d399' : l.similarity >= 50 ? '#fbbf24' : '#60a5fa';
+      h += '<tr><td style="font-weight:600;color:var(--text-primary)">' + l.account_name + '</td>';
+      h += '<td><div style="display:flex;align-items:center;gap:6px"><span style="font-weight:700;color:' + simColor + '">' + l.similarity + '%</span><div style="width:50px;height:4px;border-radius:2px;background:rgba(255,255,255,0.04);overflow:hidden"><div style="height:100%;width:' + l.similarity + '%;background:' + simColor + ';border-radius:2px"></div></div></div></td>';
+      h += '<td style="font-size:12px;color:var(--text-muted)">' + (l.industry || '--') + '</td>';
+      h += '<td style="font-weight:600">' + fmtD(l.total_it_spend) + '</td>';
+      h += '<td><span class="stack-chip' + ((l.cdn_primary||'').toLowerCase().includes('cloudflare')?' is-cf':'') + '">' + (l.cdn_primary || '--') + '</span></td>';
+      h += '<td><span class="stack-chip">' + (l.security_primary || '--') + '</span></td>';
+      h += '<td><a href="#/account/' + l.id + '" class="btn btn-ghost btn-sm" style="font-size:11px">View</a></td></tr>';
+    }
+    if (!data.lookalikes.length) h += '<tr><td colspan="7" style="text-align:center;padding:32px;color:var(--text-muted)">No similar accounts found (need more accounts uploaded)</td></tr>';
+    h += '</tbody></table></div></div>';
+    out.innerHTML = h;
+  }).catch(function(e) { out.innerHTML = '<div style="padding:24px;color:var(--red)">' + e.message + '</div>'; });
+}
+
+// ── Meeting Prep ──────────────────────────────────────────────────
+function runMeetingPrep(a, out) {
+  out.innerHTML = '<div class="output-card"><div class="ai-loading"><div class="ai-pulse">' + IC.sparkles + '</div><div class="ai-loading-text">Preparing meeting brief for ' + a.account_name + '...</div><div class="ai-loading-sub">Analyzing account data, research reports, and recent messages with AI</div></div></div>';
+  api.post('/meeting-prep/' + a.id, {}).then(function(r) {
+    out.innerHTML = '<div class="output-card slide-up"><div class="output-header"><div class="output-header-left">' + IC.sparkles + '<div><div class="output-header-title">Meeting Prep: ' + r.accountName + '</div><div class="output-header-sub">AI-generated call preparation brief</div></div></div><button class="btn btn-ghost btn-sm" onclick="copyEl(this)">' + IC.copy + ' Copy</button></div><div class="output-body">' + md(r.content) + '</div></div>';
+  }).catch(function(e) { out.innerHTML = '<div style="padding:24px;color:var(--red)">' + e.message + '</div>'; });
+}
+
+// ── Sequences ─────────────────────────────────────────────────────
+function runSequences(a, out) {
+  out.innerHTML = '<div class="loading-state"><div class="spinner"></div>Loading sequence templates...</div>';
+
+  Promise.all([api.get('/sequence-templates'), api.get('/sequences')]).then(function(res) {
+    var templates = res[0];
+    var existing = (res[1] || []).filter(function(s) { return s.account_id === a.id; });
+    var tKeys = Object.keys(templates);
+
+    var h = '<div class="slide-up">';
+
+    // Existing sequences
+    if (existing.length) {
+      h += '<div class="persona-section-title">Existing Sequences for ' + a.account_name + '</div>';
+      for (var i = 0; i < existing.length; i++) {
+        var seq = existing[i];
+        h += '<div class="d-card" style="margin-bottom:10px"><div style="font-size:14px;font-weight:700;color:var(--text-primary)">' + seq.name + '</div>';
+        h += '<div style="font-size:11px;color:var(--text-muted);margin:6px 0">' + seq.persona.toUpperCase() + ' &middot; ' + seq.touches.length + ' touches &middot; ' + seq.status + '</div>';
+        for (var j = 0; j < seq.touches.length; j++) {
+          var t = seq.touches[j];
+          var chIcon = t.channel === 'email' ? IC.mail : t.channel === 'phone' ? IC.zap : IC.linkedin;
+          h += '<div style="display:flex;align-items:flex-start;gap:10px;padding:10px 0;border-top:1px solid var(--border-glass)">';
+          h += '<div style="display:flex;flex-direction:column;align-items:center;gap:4px;min-width:60px"><span style="font-size:10px;font-weight:700;color:var(--accent-bright)">DAY ' + t.day + '</span><span style="color:var(--text-muted)">' + chIcon + '</span><span style="font-size:9px;color:var(--text-muted)">' + t.channel + '</span></div>';
+          h += '<div style="flex:1"><div style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:4px">' + t.description + '</div>';
+          if (t.content) h += '<div style="font-size:12px;color:var(--text-muted);line-height:1.5;max-height:80px;overflow:hidden">' + t.content.slice(0, 200) + '...</div>';
+          h += '</div></div>';
+        }
+        h += '</div>';
+      }
+    }
+
+    // Template selector
+    h += '<div class="persona-section-title" style="margin-top:20px">Generate New Sequence</div>';
+    h += '<div class="research-grid" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr));margin-bottom:16px">';
+    for (var i = 0; i < tKeys.length; i++) {
+      var tk = tKeys[i];
+      var t = templates[tk];
+      h += '<div class="research-card seq-template-card" data-key="' + tk + '" style="cursor:pointer">';
+      h += '<div class="research-card-title">' + t.name + '</div>';
+      h += '<div class="research-card-desc">' + t.touches.length + ' touches over ' + t.touches[t.touches.length-1].day + ' days: ' + t.touches.map(function(x){return x.channel}).join(', ') + '</div>';
+      h += '</div>';
+    }
+    h += '</div>';
+
+    h += '<div style="display:flex;gap:12px;margin-bottom:16px">';
+    h += '<select class="filter-select" id="seq-persona"><option value="bdr">BDR</option><option value="ae">AE</option><option value="csm">CSM</option><option value="se">SE</option><option value="vp_sales">VP Sales</option></select>';
+    h += '<button class="btn btn-primary" id="gen-seq-btn" disabled>' + IC.sparkles + ' Generate Sequence</button>';
+    h += '</div>';
+    h += '<div id="seq-output"></div>';
+    h += '</div>';
+    out.innerHTML = h;
+
+    var selTemplate = null;
+    var tCards = document.querySelectorAll('.seq-template-card');
+    for (var i = 0; i < tCards.length; i++) {
+      (function(card) {
+        card.addEventListener('click', function() {
+          for (var x = 0; x < tCards.length; x++) tCards[x].classList.remove('selected');
+          card.classList.add('selected');
+          selTemplate = card.getAttribute('data-key');
+          document.getElementById('gen-seq-btn').disabled = false;
+        });
+      })(tCards[i]);
+    }
+
+    document.getElementById('gen-seq-btn').addEventListener('click', function() {
+      if (!selTemplate) return;
+      var btn = this;
+      btn.disabled = true;
+      btn.innerHTML = '<div class="spinner" style="width:14px;height:14px;border-width:2px;display:inline-block;vertical-align:middle;margin-right:6px"></div> Generating ' + templates[selTemplate].touches.length + ' touches...';
+      var seqOut = document.getElementById('seq-output');
+      seqOut.innerHTML = '<div class="output-card"><div class="ai-loading"><div class="ai-pulse">' + IC.sparkles + '</div><div class="ai-loading-text">Generating multi-touch sequence...</div><div class="ai-loading-sub">Creating personalized content for each touch point</div></div></div>';
+
+      api.post('/sequences', {
+        account_id: a.id,
+        persona: document.getElementById('seq-persona').value,
+        template_key: selTemplate,
+      }).then(function(r) {
+        var sh = '<div class="output-card slide-up"><div class="output-header"><div class="output-header-left"><div class="output-header-title">' + (r.name || 'Sequence') + '</div><div class="output-header-sub">' + r.touches.length + ' touches generated</div></div></div>';
+        sh += '<div style="padding:20px">';
+        for (var j = 0; j < r.touches.length; j++) {
+          var t = r.touches[j];
+          var chIcon = t.channel === 'email' ? IC.mail : t.channel === 'phone' ? IC.zap : IC.linkedin;
+          sh += '<div style="display:flex;align-items:flex-start;gap:14px;padding:16px 0;' + (j > 0 ? 'border-top:1px solid var(--border-glass)' : '') + '">';
+          sh += '<div style="display:flex;flex-direction:column;align-items:center;gap:4px;min-width:70px"><div style="background:var(--accent-glow);color:var(--accent-bright);font-weight:700;font-size:11px;padding:4px 10px;border-radius:var(--radius-pill)">DAY ' + t.day + '</div><span style="color:var(--text-muted)">' + chIcon + '</span><span style="font-size:10px;color:var(--text-muted)">' + t.channel + '</span></div>';
+          sh += '<div style="flex:1"><div style="font-size:12px;font-weight:600;color:var(--accent-bright);margin-bottom:6px">' + t.description + '</div>';
+          sh += '<div style="font-size:13px;color:var(--text-secondary);line-height:1.7">' + md(t.content || '') + '</div></div></div>';
+        }
+        sh += '</div></div>';
+        seqOut.innerHTML = sh;
+        btn.disabled = false;
+        btn.innerHTML = IC.sparkles + ' Generate Sequence';
+      }).catch(function(e) {
+        seqOut.innerHTML = '<div style="padding:24px;color:var(--red)">' + e.message + '</div>';
+        btn.disabled = false;
+        btn.innerHTML = IC.sparkles + ' Generate Sequence';
+      });
+    });
+  }).catch(function(e) { out.innerHTML = '<div style="padding:24px;color:var(--red)">' + e.message + '</div>'; });
+}
+
+// ── Change Detection ──────────────────────────────────────────────
+function runChangeDetect(a, out) {
+  out.innerHTML = '<div class="output-card"><div class="ai-loading"><div class="ai-pulse">' + IC.zap + '</div><div class="ai-loading-text">Scanning ' + a.account_name + '...</div><div class="ai-loading-sub">Probing CDN, DNS, server headers, and comparing to last known state</div></div></div>';
+  api.post('/detect-changes/' + a.id, {}).then(function(r) {
+    var h = '<div class="output-card slide-up"><div class="output-header"><div class="output-header-left">' + IC.zap + '<div><div class="output-header-title">Infrastructure Scan: ' + a.account_name + '</div><div class="output-header-sub">' + (r.isFirstProbe ? 'First scan (baseline recorded)' : r.changes.length + ' changes detected') + '</div></div></div></div>';
+    h += '<div style="padding:24px">';
+
+    // Current state
+    h += '<div class="persona-section-title">Current State</div>';
+    h += '<div class="d-row"><span class="d-row-label">CDN Detected</span><span class="d-row-value">' + (r.current.cdn || 'None') + '</span></div>';
+    h += '<div class="d-row"><span class="d-row-label">DNS Provider</span><span class="d-row-value">' + (r.current.dns || 'Unknown') + '</span></div>';
+    h += '<div class="d-row"><span class="d-row-label">Server</span><span class="d-row-value">' + (r.current.server || 'Unknown') + '</span></div>';
+
+    if (r.changes.length) {
+      h += '<div class="persona-section-title" style="margin-top:20px;color:var(--red)">Changes Detected</div>';
+      for (var i = 0; i < r.changes.length; i++) {
+        var ch = r.changes[i];
+        h += '<div style="padding:12px;margin-bottom:8px;background:rgba(248,113,113,0.06);border:1px solid rgba(248,113,113,0.15);border-radius:var(--radius-md)">';
+        h += '<div style="font-size:13px;font-weight:700;color:var(--red)">' + ch.type + '</div>';
+        h += '<div style="font-size:12px;color:var(--text-muted);margin-top:4px"><span style="text-decoration:line-through">' + ch.from + '</span> → <span style="color:var(--green);font-weight:600">' + ch.to + '</span></div>';
+        h += '</div>';
+      }
+    } else if (!r.isFirstProbe) {
+      h += '<div style="margin-top:16px;padding:14px;background:rgba(52,211,153,0.06);border:1px solid rgba(52,211,153,0.15);border-radius:var(--radius-md);font-size:13px;color:var(--green);font-weight:600">No infrastructure changes detected since last scan.</div>';
+    }
+
+    h += '</div></div>';
+    out.innerHTML = h;
+  }).catch(function(e) { out.innerHTML = '<div style="padding:24px;color:var(--red)">' + e.message + '</div>'; });
+}
+
+// ── A/B Email Testing ─────────────────────────────────────────────
+function runABTest(a, out) {
+  var h = '<div class="d-card">';
+  h += '<div class="d-card-title">' + IC.bar + ' A/B Email Test</div>';
+  h += '<p style="font-size:13px;color:var(--text-muted);margin-bottom:16px">Generate two email variants for ' + a.account_name + ': one with a business outcome hook, one with a technical insight hook.</p>';
+  h += '<div style="display:flex;gap:12px;margin-bottom:12px">';
+  h += '<select class="filter-select" id="ab-persona"><option value="bdr">BDR</option><option value="ae">AE</option><option value="csm">CSM</option><option value="se">SE</option><option value="vp_sales">VP Sales</option></select>';
+  h += '<select class="filter-select" id="ab-msg-type"><option value="cold_outreach">Cold Outreach</option><option value="follow_up">Follow Up</option><option value="value_prop">Value Prop</option><option value="competitive_displacement">Competitive Displacement</option></select>';
+  h += '</div>';
+  h += '<textarea class="context-area" id="ab-context" placeholder="Optional context..." style="min-height:60px;margin-bottom:12px"></textarea>';
+  h += '<button class="btn btn-primary" id="gen-ab-btn">' + IC.sparkles + ' Generate A/B Variants</button>';
+  h += '</div>';
+  h += '<div id="ab-results" style="margin-top:20px"></div>';
+  out.innerHTML = h;
+
+  document.getElementById('gen-ab-btn').addEventListener('click', function() {
+    var btn = this;
+    btn.disabled = true;
+    btn.innerHTML = '<div class="spinner" style="width:14px;height:14px;border-width:2px;display:inline-block;vertical-align:middle;margin-right:6px"></div> Generating 2 variants...';
+    var results = document.getElementById('ab-results');
+    results.innerHTML = '<div class="output-card"><div class="ai-loading"><div class="ai-pulse">' + IC.sparkles + '</div><div class="ai-loading-text">Generating two email variants in parallel...</div><div class="ai-loading-sub">Variant A: Business Outcome hook &middot; Variant B: Technical Insight hook</div></div></div>';
+
+    api.post('/ab-test/' + a.id, {
+      persona: document.getElementById('ab-persona').value,
+      messageType: document.getElementById('ab-msg-type').value,
+      customContext: document.getElementById('ab-context').value,
+    }).then(function(r) {
+      var rh = '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px" class="slide-up">';
+
+      // Variant A
+      rh += '<div class="email-preview">';
+      rh += '<div class="email-toolbar"><div class="email-dot r"></div><div class="email-dot y"></div><div class="email-dot g"></div><span style="margin-left:auto;font-size:11px;color:#34d399;font-weight:700">VARIANT A: Business Outcome</span></div>';
+      rh += '<div class="email-body" style="font-size:13px">' + md(r.variantA || '') + '</div>';
+      rh += '<div class="email-actions"><button class="btn btn-primary btn-sm" onclick="copyEl(this,\'email\')">' + IC.copy + ' Copy A</button></div></div>';
+
+      // Variant B
+      rh += '<div class="email-preview">';
+      rh += '<div class="email-toolbar"><div class="email-dot r"></div><div class="email-dot y"></div><div class="email-dot g"></div><span style="margin-left:auto;font-size:11px;color:#60a5fa;font-weight:700">VARIANT B: Technical Insight</span></div>';
+      rh += '<div class="email-body" style="font-size:13px">' + md(r.variantB || '') + '</div>';
+      rh += '<div class="email-actions"><button class="btn btn-primary btn-sm" onclick="copyEl(this,\'email\')">' + IC.copy + ' Copy B</button></div></div>';
+
+      rh += '</div>';
+      results.innerHTML = rh;
+      btn.disabled = false;
+      btn.innerHTML = IC.sparkles + ' Generate A/B Variants';
+    }).catch(function(e) {
+      results.innerHTML = '<div style="padding:24px;color:var(--red)">' + e.message + '</div>';
+      btn.disabled = false;
+      btn.innerHTML = IC.sparkles + ' Generate A/B Variants';
+    });
+  });
+}
+
+// ── Voice Notes ───────────────────────────────────────────────────
+function runVoiceNote(a, out) {
+  var h = '<div class="d-card">';
+  h += '<div class="d-card-title">' + IC.send + ' Voice Notes → Follow-Up Email</div>';
+  h += '<p style="font-size:13px;color:var(--text-muted);margin-bottom:16px">Paste your call notes or voice-to-text transcript. AI will generate a professional follow-up email referencing the specific topics discussed.</p>';
+  h += '<textarea class="context-area" id="voice-transcript" placeholder="e.g. Great call with their VP of Eng. They are concerned about latency in APAC region. Currently using Akamai but open to evaluating. Budget cycle is Q2. They want a POC by March. Main pain point is egress costs..." style="min-height:120px"></textarea>';
+  h += '<button class="btn btn-primary" id="gen-voice-btn">' + IC.sparkles + ' Generate Follow-Up Email</button>';
+  h += '</div>';
+  h += '<div id="voice-output" style="margin-top:20px"></div>';
+  out.innerHTML = h;
+
+  document.getElementById('gen-voice-btn').addEventListener('click', function() {
+    var transcript = document.getElementById('voice-transcript').value.trim();
+    if (!transcript) { toast('Enter your call notes first', 'error'); return; }
+    var btn = this;
+    btn.disabled = true;
+    btn.innerHTML = '<div class="spinner" style="width:14px;height:14px;border-width:2px;display:inline-block;vertical-align:middle;margin-right:6px"></div> Generating email...';
+    var voiceOut = document.getElementById('voice-output');
+    voiceOut.innerHTML = '<div class="output-card"><div class="ai-loading"><div class="ai-pulse">' + IC.sparkles + '</div><div class="ai-loading-text">Generating follow-up email from your notes...</div></div></div>';
+
+    api.post('/voice-note', { accountId: a.id, transcript: transcript }).then(function(r) {
+      var content = r.email || '';
+      var subjectM = content.match(/Subject:?\s*(.+?)(?:\n|$)/i);
+      var subject = subjectM ? subjectM[1].trim() : 'Follow-up';
+      var emailBody = content.replace(/^Subject:?\s*.+\n*/im, '');
+
+      voiceOut.innerHTML = '<div class="email-preview slide-up">'
+        + '<div class="email-toolbar"><div class="email-dot r"></div><div class="email-dot y"></div><div class="email-dot g"></div><span style="margin-left:auto;font-size:11px;color:var(--text-muted);font-weight:600">Voice Note Follow-Up</span></div>'
+        + '<div class="email-subject-bar"><div class="email-subject-label">Subject</div><div class="email-subject">' + subject + '</div></div>'
+        + '<div class="email-body">' + md(emailBody) + '</div>'
+        + '<div class="email-actions"><button class="btn btn-primary btn-sm" onclick="copyEl(this,\'email\')">' + IC.copy + ' Copy Email</button></div></div>';
+
+      btn.disabled = false;
+      btn.innerHTML = IC.sparkles + ' Generate Follow-Up Email';
+    }).catch(function(e) {
+      voiceOut.innerHTML = '<div style="padding:24px;color:var(--red)">' + e.message + '</div>';
+      btn.disabled = false;
+      btn.innerHTML = IC.sparkles + ' Generate Follow-Up Email';
+    });
+  });
 }
 
 // ── Copy Utility ───────────────────────────────────────────────────

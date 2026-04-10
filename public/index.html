@@ -13,10 +13,10 @@
 </head>
 <body>
   <div id="app">
-    <div id="platform-bar" style="background:rgba(94,106,210,0.06);border-bottom:1px solid rgba(124,127,255,0.1);padding:6px 32px;display:flex;align-items:center;justify-content:center;gap:20px;font-size:11px;font-weight:600;flex-wrap:wrap">
-      <span style="color:var(--text-muted);font-size:10px">Bug or feedback? Report to <strong style="color:var(--text-secondary)">Arun Potta</strong></span>
-      <span style="color:rgba(255,255,255,0.08)">|</span>
-      <span id="pb-content" style="display:flex;align-items:center;gap:16px"></span>
+    <div id="platform-bar" class="platform-bar">
+      <span style="color:var(--text-muted)">Bugs or feedback? Report to <strong style="color:var(--text-secondary)">Arun Potta</strong></span>
+      <span class="platform-sep"></span>
+      <span id="pb-content" style="display:inline-flex;align-items:center;gap:14px"></span>
     </div>
     <nav id="nav">
       <div class="nav-inner">
@@ -27,11 +27,22 @@
         </a>
         <div class="nav-links">
           <a href="#/" class="nav-link" data-route="dashboard">Dashboard</a>
-          <a href="#/threats" class="nav-link" data-route="threats">Threat Intel</a>
+          <a href="#/threats" class="nav-link" data-route="threats">Threats</a>
           <a href="#/campaigns" class="nav-link" data-route="campaigns">Campaigns</a>
+          <span class="nav-sep"></span>
+          <a href="#/pipeline" class="nav-link" data-route="pipeline">Pipeline</a>
+          <a href="#/lead-scores" class="nav-link" data-route="lead-scores">Leads</a>
+          <a href="#/alerts" class="nav-link" data-route="alerts">Alerts<span id="alert-badge" class="nav-badge"></span></a>
+          <span class="nav-sep"></span>
+          <a href="#/team" class="nav-link" data-route="team">Team</a>
+          <a href="#/playbooks" class="nav-link" data-route="playbooks">Playbooks</a>
           <a href="#/upload" class="nav-link" data-route="upload">Upload</a>
         </div>
         <div class="nav-right">
+          <div style="position:relative">
+            <input type="text" id="nav-search" placeholder="Search intel..." style="background:var(--glass);border:1px solid var(--border-glass);border-radius:var(--radius-md);padding:5px 10px 5px 28px;font-size:11px;color:var(--text-primary);outline:none;width:140px;font-family:inherit;transition:all 0.2s" onfocus="this.style.width='200px';this.style.borderColor='var(--border-accent)'" onblur="this.style.width='140px';this.style.borderColor=''" />
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="position:absolute;left:8px;top:50%;transform:translateY(-50%);width:12px;height:12px;color:var(--text-muted);pointer-events:none"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+          </div>
           <button class="btn btn-ghost btn-sm" style="font-size:11px;padding:4px 10px" id="gmail-setup-btn">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px;display:inline;vertical-align:middle;margin-right:4px"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>
             Connect Gmail
@@ -114,6 +125,16 @@
               });
             });
           });
+          </script>
+          <script>
+          document.getElementById('nav-search').addEventListener('keydown', function(e) {
+            if (e.key === 'Enter' && this.value.trim()) { location.hash = '#/search/' + encodeURIComponent(this.value.trim()); this.blur(); }
+          });
+          fetch('/api/alerts').then(function(r){return r.json()}).then(function(alerts) {
+            var unread = (alerts || []).filter(function(a){return !a.read}).length;
+            var badge = document.getElementById('alert-badge');
+            if (badge && unread > 0) { badge.textContent = unread; badge.style.display = 'inline-flex'; }
+          }).catch(function(){});
           </script>
           <span class="nav-stat" id="nav-stat" style="display:none"></span>
         </div>

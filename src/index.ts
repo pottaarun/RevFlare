@@ -3255,6 +3255,127 @@ app.delete('/api/opportunities/:id', async (c) => {
   return c.json({ success: true });
 });
 
+// ── Opportunity Agent: AI auto-generates opportunities from account data ──
+app.post('/api/opportunities/auto-generate', async (c) => {
+  const email = c.get('userEmail');
+  const { limit: maxOpps } = await c.req.json<any>().catch(() => ({ limit: 10 }));
+
+  // Get all accounts sorted by IT spend
+  const accounts = await c.env.DB.prepare(
+    'SELECT * FROM accounts WHERE user_email = ? ORDER BY total_it_spend DESC LIMIT 200'
+  ).bind(email).all();
+
+  // Get existing opportunities to avoid duplicates
+  const existingOpps = await c.env.DB.prepare(
+    'SELECT account_id, account_name FROM opportunities WHERE user_email = ?'
+  ).bind(email).all();
+  const existingIds = new Set((existingOpps.results as any[]).map(o => o.account_id));
+  const existingNames = new Set((existingOpps.results as any[]).map(o => (o.account_name || '').toLowerCase()));
+
+  // Score and filter candidates — skip accounts that already have opportunities
+  const candidates = (accounts.results as any[])
+    .filter(a => !existingIds.has(a.id) && !existingNames.has((a.account_name || '').toLowerCase()))
+    .map(a => {
+      const { score, factors } = calculateLeadScore(a);
+      const roi = calculateROI(a);
+      return { account: a, leadScore: score, factors, roi };
+    })
+    .filter(c => c.leadScore >= 30) // minimum threshold
+    .sort((a, b) => b.leadScore - a.leadScore)
+    .slice(0, Math.min(maxOpps || 10, 20));
+
+  if (!candidates.length) {
+    return c.json({ created: [], message: 'No new opportunities found. All high-scoring accounts already have opportunities, or no accounts meet the threshold.' });
+  }
+
+  // Build a compact summary for the AI to analyze in batch
+  const accountSummaries = candidates.map((c, i) => {
+    const a = c.account;
+    const topFactors = c.factors.slice(0, 3).map(f => f.name + ' (' + f.detail + ')').join(', ');
+    return `[${i}] ${a.account_name} | Industry: ${a.industry || 'Unknown'} | IT Spend: $${((a.total_it_spend || 0) / 1000).toFixed(0)}K/mo | CF MRR: $${(a.current_monthly_fee || 0).toFixed(0)} | CDN: ${a.cdn_primary || 'none'} | Security: ${a.security_primary || 'none'} | Country: ${a.billing_country || 'Unknown'} | Employees: ${a.employees || '?'} | Lead Score: ${c.leadScore}/100 | Factors: ${topFactors} | Annual Savings Potential: $${((c.roi.annualSavings || 0) / 1000).toFixed(0)}K`;
+  }).join('\n');
+
+  // ── Stage 1: DeepSeek R1 — deep reasoning about each account ──
+  const reasoningSystem = `You are an elite Cloudflare sales strategist. Analyze each account deeply and reason about:
+1. What % of their IT spend is addressable by Cloudflare (CDN, security, DNS, Zero Trust, Workers)?
+2. Which competitors can realistically be displaced, and what's the typical win rate?
+3. What deal stage makes sense given their engagement signals, company size, and spend level?
+4. What's a realistic ACV? Consider: addressable spend, typical conversion rates (2-8% of IT spend for new logos, higher for expansion), competitive dynamics, and industry willingness-to-pay.
+5. What's the #1 sales play for each account?
+
+Think step by step. Be specific with numbers and reasoning.`;
+
+  const reasoningPrompt = `Analyze these ${candidates.length} accounts for opportunity creation:\n\n${accountSummaries}`;
+
+  try {
+    // Stage 1: Deep reasoning with DeepSeek R1
+    const deepAnalysis = await runAI(c.env.AI, RESEARCH_MODEL, reasoningSystem, reasoningPrompt);
+
+    // ── Stage 2: Llama 3.3 70B — structured JSON from analysis ──
+    const structuredSystem = `You are a data formatter. Given a sales analysis of accounts, extract the key decisions into a clean JSON array.
+Return ONLY a valid JSON array like: [{"index":0,"stage":"prospecting","acv":50000,"notes":"..."},...]
+- "index": the account index number [0], [1], etc from the original list
+- "stage": exactly one of "prospecting", "qualification", "proposal", "negotiation"
+- "acv": annual contract value in dollars (integer, no decimals)
+- "notes": 1-2 sentence actionable sales insight
+No markdown fences, no explanation text, ONLY the JSON array.`;
+
+    const structuredPrompt = `Original accounts:\n${accountSummaries}\n\n---\nDeepSeek R1 Analysis:\n${deepAnalysis}\n\n---\nConvert the analysis above into the JSON array format. One entry per account.`;
+
+    const aiResult = await runAI(c.env.AI, EMAIL_MODEL, structuredSystem, structuredPrompt);
+
+    // Parse AI response — extract JSON array
+    const jsonMatch = aiResult.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) {
+      return c.json({ error: 'AI did not return valid JSON. Raw: ' + aiResult.slice(0, 500) }, 500);
+    }
+
+    let aiOpps: any[];
+    try {
+      aiOpps = JSON.parse(jsonMatch[0]);
+    } catch {
+      return c.json({ error: 'Failed to parse AI JSON: ' + jsonMatch[0].slice(0, 500) }, 500);
+    }
+
+    // Create opportunities in DB
+    const created: any[] = [];
+    for (const aiOpp of aiOpps) {
+      const idx = aiOpp.index;
+      if (idx === undefined || idx < 0 || idx >= candidates.length) continue;
+
+      const candidate = candidates[idx];
+      const a = candidate.account;
+      const acv = Math.max(0, Math.round(aiOpp.acv || candidate.roi.annualSavings * 0.3));
+      const stage = ['prospecting', 'qualification', 'proposal', 'negotiation', 'closed_won', 'closed_lost'].includes(aiOpp.stage) ? aiOpp.stage : 'prospecting';
+      const notes = (aiOpp.notes || '').slice(0, 500) || `Lead Score: ${candidate.leadScore}/100. ${candidate.factors[0]?.detail || ''}`;
+
+      const r = await c.env.DB.prepare(
+        'INSERT INTO opportunities (account_id, account_name, industry, country, acv, stage, notes, user_email) VALUES (?,?,?,?,?,?,?,?)'
+      ).bind(a.id, a.account_name, a.industry || '', a.billing_country || '', acv, stage, notes, email).run();
+
+      created.push({
+        id: r.meta.last_row_id,
+        account_name: a.account_name,
+        industry: a.industry,
+        country: a.billing_country,
+        acv,
+        stage,
+        notes,
+        leadScore: candidate.leadScore,
+      });
+    }
+
+    return c.json({
+      created,
+      totalAnalyzed: candidates.length,
+      totalCreated: created.length,
+      message: `Agent created ${created.length} opportunities from ${candidates.length} analyzed accounts.`,
+    });
+  } catch (e: any) {
+    return c.json({ error: 'Agent failed: ' + e.message }, 500);
+  }
+});
+
 app.get('/api/acv', async (c) => {
   const email = c.get('userEmail');
   const total = await c.env.DB.prepare('SELECT COALESCE(SUM(acv),0) as total FROM opportunities WHERE user_email = ?').bind(email).first() as any;

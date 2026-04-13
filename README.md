@@ -41,6 +41,7 @@
 - **Calculate ROI**, find lookalike accounts, generate meeting prep, build multi-touch sequences, detect infrastructure changes, run A/B email tests, and convert voice notes to follow-up emails
 - **Track lead scores**, alerts, team activity, playbooks, and semantic search across all generated intel
 - **Monitor usage analytics** with page/tab visit tracking, daily trends, per-user activity, and tab popularity rankings
+- **Review and approve emails before sending** with a full approval workflow — each generated email shows recipient details (account name, website, industry, location, IT spend) and must be explicitly approved before it can be sent via Gmail
 - **Send emails directly via Gmail** through OAuth integration
 - **Sync with Salesforce** via OAuth to push activities and pull opportunities
 - **Share account intelligence** via tokenized public links that bypass Cloudflare Access
@@ -148,9 +149,9 @@ Worker secrets always take priority over D1 settings.
 |-------|---------|-------------|
 | `accounts` | Salesforce data (40+ columns) | account_name, website, industry, IT spend breakdown by category, competitor products, user_email |
 | `research_reports` | AI research output | account_id, report_type, content, user_email |
-| `persona_messages` | Generated emails | account_id, persona, message_type, subject, content, user_email |
+| `persona_messages` | Generated emails | account_id, persona, message_type, subject, content, approval_status, user_email |
 | `campaigns` | Mass email campaigns | name, theme, persona, accountIds (JSON), status, generated count |
-| `campaign_emails` | Individual campaign emails | campaign_id, account_id, subject, content, status |
+| `campaign_emails` | Individual campaign emails | campaign_id, account_id, subject, content, status, approval_status |
 | `share_tokens` | Public share links | token (32-char UUID), account_id, created_by, expires_at (30-day default) |
 | `gmail_tokens` | OAuth tokens | user_email (PK), access_token, refresh_token, gmail_address |
 | `salesforce_tokens` | SF OAuth tokens | user_email (PK), instance_url, access_token, refresh_token |
@@ -222,6 +223,8 @@ All data is **user-scoped** via `user_email` column.
 | `GET` | `/api/personas` | All 5 persona configs |
 | `POST` | `/api/messaging/:id` | Generate persona email |
 | `GET` | `/api/messaging/:id` | List messages |
+| `POST` | `/api/messages/:id/approve` | Approve email for sending |
+| `POST` | `/api/messages/:id/reject` | Reject email |
 
 ### Competitive Intel
 | Method | Path | Description |
@@ -243,6 +246,10 @@ All data is **user-scoped** via `user_email` column.
 | `POST` | `/api/campaigns` | Create with account selection |
 | `POST` | `/api/campaigns/:id/generate` | Generate batch (2 emails) |
 | `GET` | `/api/campaigns/:id/export` | Download CSV |
+| `POST` | `/api/campaign-emails/:id/approve` | Approve campaign email |
+| `POST` | `/api/campaign-emails/:id/reject` | Reject campaign email |
+| `POST` | `/api/campaigns/:id/approve-all` | Bulk approve all pending |
+| `POST` | `/api/campaigns/:id/reject-all` | Bulk reject all pending |
 
 ### Advanced Features
 | Method | Path | Description |
@@ -291,8 +298,8 @@ All data is **user-scoped** via `user_email` column.
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/api/gmail/connect` | Start OAuth flow |
-| `POST` | `/api/gmail/send` | Send email |
-| `POST` | `/api/gmail/send-campaign/:id` | Bulk send (10/batch) |
+| `POST` | `/api/gmail/send` | Send email (requires approval) |
+| `POST` | `/api/gmail/send-campaign/:id` | Bulk send approved emails (10/batch) |
 
 ### Salesforce
 | Method | Path | Description |
@@ -350,7 +357,7 @@ Dashboard  Threats  Campaigns  |  Pipeline  Leads  Alerts  |  Team  Playbooks  U
 | **Deep Research** | 4 research types with live 8-probe data |
 | **Threat Intel** | Account-matched incidents with email generation |
 | **Competitive Intel** | Full product catalog with live battlecard generation |
-| **Email Composer** | 5 personas × 5 message types with probe pre-fetch |
+| **Email Composer** | 5 personas × 5 message types with probe pre-fetch, recipient info display, and approval workflow (approve/reject before sending) |
 | **Advanced** | ROI Calculator, Lookalike Accounts, Meeting Prep, Multi-Touch Sequences, Change Detection, A/B Email Testing, Voice Notes |
 | **History** | All generated research and messages |
 
@@ -534,6 +541,13 @@ Built-in page and tab visit tracking to understand how your team uses RevFlare.
 
 OAuth flow via Google Cloud Console credentials. Stored encrypted in D1 or as Worker secrets. Sends via Gmail API (`gmail.send` scope only). Auto-refreshes tokens. In-app wizard with no CLI needed.
 
+**Email Approval Workflow**: Every generated email (persona messages and campaign emails) starts with `pending_approval` status. Before sending via Gmail, users must:
+1. **Review recipient info** — account name, website, industry, location, account status, IT spend, and tech stack are displayed prominently
+2. **Approve or reject** — explicit approve/reject buttons gate the send action
+3. **Send** — only approved emails can be sent via Gmail; the backend enforces this check
+
+For campaigns, bulk approve/reject actions and filter-by-status tabs allow efficient review of large email batches.
+
 ---
 
 ## 19. Salesforce Integration
@@ -565,6 +579,7 @@ cd RevFlare
 npm install
 wrangler d1 create revflare-db                              # Create database
 wrangler d1 execute revflare-db --remote --file=schema-full.sql  # All 18 tables + indexes
+wrangler d1 execute revflare-db --remote --file=migration-approval.sql  # Add approval workflow columns
 wrangler deploy                                              # Deploy to Cloudflare
 ```
 
@@ -587,6 +602,7 @@ revFlare/
 ├── screenshots/              # App screenshots (auto-generated)
 ├── schema-full.sql           # Complete DB schema (18 tables + indexes)
 ├── schema.sql                # Core DB schema (legacy)
+├── migration-approval.sql    # Email approval workflow migration
 ├── seed.mjs                  # Excel seed script
 ├── build_final_pptx.py       # Presentation builder (mock server + Playwright + python-pptx)
 ├── RevFlare-Presentation.pptx  # 7-slide presentation with screenshots

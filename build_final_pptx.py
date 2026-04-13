@@ -281,19 +281,20 @@ if os.path.exists(shot_l):
 # ══════════════════════════════════════════════════════════════════
 s=prs.slides.add_slide(prs.slide_layouts[6]); bg(s)
 bar(s,Inches(0.5),Inches(0.5),Inches(1.5),ACC)
-txt(s,Inches(0.5),Inches(0.65),Inches(10),Inches(0.5),'15 Features + Competitive Intelligence',sz=32,c=WHT,b=True)
+txt(s,Inches(0.5),Inches(0.65),Inches(10),Inches(0.5),'16 Features + Competitive Intelligence',sz=32,c=WHT,b=True)
 
 # Features - 5x3 compact grid
 feats = [
     ('Lead Scoring','AI 0-100',GRN),('ROI Calc','Savings est.',BLU),('Lookalikes','Match stack',PUR),('Meeting Prep','Call brief',AMB),('Sequences','Multi-touch',ORG),
     ('Change Detect','Infra scan',RED),('A/B Testing','2 variants',ACC),('Voice Notes','To email',GRN),('Alerts','Signals',RED),('Team Dash','Leaderboard',BLU),
     ('Playbooks','Templates',PUR),('Search','AI-ranked',AMB),('Pipeline','ACV track',GRN),('Win/Loss','Analysis',ORG),('Opp Agent','Auto gen',ACC),
+    ('Email Approval','Review & gate',GRN),
 ]
 for i,(nm,ds,c) in enumerate(feats):
-    col=i%5; row=i//5; x=Inches(0.5+col*1.65); y=Inches(1.35+row*0.95)
-    rect(s,x,y,Inches(1.5),Inches(0.8),SURF); bar(s,x,y,Inches(1.5),c)
-    txt(s,x+Inches(0.08),y+Inches(0.12),Inches(1.35),Inches(0.22),nm,sz=10,c=c,b=True)
-    txt(s,x+Inches(0.08),y+Inches(0.38),Inches(1.35),Inches(0.3),ds,sz=8,c=MUT)
+    col=i%5; row=i//5; x=Inches(0.5+col*1.65); y=Inches(1.35+row*0.85)
+    rect(s,x,y,Inches(1.5),Inches(0.7),SURF); bar(s,x,y,Inches(1.5),c)
+    txt(s,x+Inches(0.08),y+Inches(0.08),Inches(1.35),Inches(0.22),nm,sz=10,c=c,b=True)
+    txt(s,x+Inches(0.08),y+Inches(0.32),Inches(1.35),Inches(0.3),ds,sz=8,c=MUT)
 
 # Competitive - right half
 txt(s,Inches(8.75),Inches(1.25),Inches(4),Inches(0.25),'COMPETITIVE (12 CATEGORIES, 40+ RIVALS)',sz=9,c=DIM,b=True)

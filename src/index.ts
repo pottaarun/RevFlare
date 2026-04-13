@@ -1743,11 +1743,11 @@ Make it feel like a real human wrote this after spending 2 hours researching the
 
   const subject = content.match(/Subject:?\s*(.+?)(?:\n|$)/i)?.[1]?.trim() || `${msgTypeLabel} - ${account.account_name}`;
 
-  await c.env.DB.prepare(
+  const insertResult = await c.env.DB.prepare(
     'INSERT INTO persona_messages (account_id, persona, message_type, subject, content, user_email) VALUES (?, ?, ?, ?, ?, ?)'
   ).bind(accountId, persona, messageType, subject, content, c.get('userEmail')).run();
 
-  return c.json({ persona, messageType, subject, content });
+  return c.json({ id: insertResult.meta.last_row_id, persona, messageType, subject, content, approval_status: 'pending_approval' });
 });
 
 app.get('/api/messaging/:accountId', async (c) => {
@@ -1759,6 +1759,74 @@ app.get('/api/messaging/:accountId', async (c) => {
   query += ' ORDER BY created_at DESC';
   const msgs = await c.env.DB.prepare(query).bind(...params).all();
   return c.json(msgs.results);
+});
+
+// ── Email Approval Workflow ────────────────────────────────────────
+app.post('/api/messages/:id/approve', async (c) => {
+  const id = c.req.param('id');
+  const email = c.get('userEmail');
+  const result = await c.env.DB.prepare(
+    'UPDATE persona_messages SET approval_status = ? WHERE id = ? AND user_email = ?'
+  ).bind('approved', id, email).run();
+  if (!result.meta.changes) return c.json({ error: 'Message not found' }, 404);
+  return c.json({ success: true, approval_status: 'approved' });
+});
+
+app.post('/api/messages/:id/reject', async (c) => {
+  const id = c.req.param('id');
+  const email = c.get('userEmail');
+  const result = await c.env.DB.prepare(
+    'UPDATE persona_messages SET approval_status = ? WHERE id = ? AND user_email = ?'
+  ).bind('rejected', id, email).run();
+  if (!result.meta.changes) return c.json({ error: 'Message not found' }, 404);
+  return c.json({ success: true, approval_status: 'rejected' });
+});
+
+// Approve/reject campaign emails
+app.post('/api/campaign-emails/:id/approve', async (c) => {
+  const id = c.req.param('id');
+  const email = c.get('userEmail');
+  const em = await c.env.DB.prepare(
+    'SELECT ce.id FROM campaign_emails ce JOIN campaigns c ON ce.campaign_id = c.id WHERE ce.id = ? AND c.user_email = ?'
+  ).bind(id, email).first();
+  if (!em) return c.json({ error: 'Email not found' }, 404);
+  await c.env.DB.prepare('UPDATE campaign_emails SET approval_status = ? WHERE id = ?').bind('approved', id).run();
+  return c.json({ success: true, approval_status: 'approved' });
+});
+
+app.post('/api/campaign-emails/:id/reject', async (c) => {
+  const id = c.req.param('id');
+  const email = c.get('userEmail');
+  const em = await c.env.DB.prepare(
+    'SELECT ce.id FROM campaign_emails ce JOIN campaigns c ON ce.campaign_id = c.id WHERE ce.id = ? AND c.user_email = ?'
+  ).bind(id, email).first();
+  if (!em) return c.json({ error: 'Email not found' }, 404);
+  await c.env.DB.prepare('UPDATE campaign_emails SET approval_status = ? WHERE id = ?').bind('rejected', id).run();
+  return c.json({ success: true, approval_status: 'rejected' });
+});
+
+// Bulk approve all pending campaign emails
+app.post('/api/campaigns/:id/approve-all', async (c) => {
+  const campaignId = c.req.param('id');
+  const email = c.get('userEmail');
+  const campaign = await c.env.DB.prepare('SELECT id FROM campaigns WHERE id = ? AND user_email = ?').bind(campaignId, email).first();
+  if (!campaign) return c.json({ error: 'Campaign not found' }, 404);
+  const result = await c.env.DB.prepare(
+    "UPDATE campaign_emails SET approval_status = 'approved' WHERE campaign_id = ? AND approval_status = 'pending_approval'"
+  ).bind(campaignId).run();
+  return c.json({ success: true, updated: result.meta.changes });
+});
+
+// Bulk reject all pending campaign emails
+app.post('/api/campaigns/:id/reject-all', async (c) => {
+  const campaignId = c.req.param('id');
+  const email = c.get('userEmail');
+  const campaign = await c.env.DB.prepare('SELECT id FROM campaigns WHERE id = ? AND user_email = ?').bind(campaignId, email).first();
+  if (!campaign) return c.json({ error: 'Campaign not found' }, 404);
+  const result = await c.env.DB.prepare(
+    "UPDATE campaign_emails SET approval_status = 'rejected' WHERE campaign_id = ? AND approval_status = 'pending_approval'"
+  ).bind(campaignId).run();
+  return c.json({ success: true, updated: result.meta.changes });
 });
 
 // ── AI: Quick Enrichment (live research placeholder) ───────────────
@@ -2340,9 +2408,20 @@ async function refreshGmailToken(db: D1Database, userEmail: string, clientId: st
 // Send email via Gmail API
 app.post('/api/gmail/send', async (c) => {
   const email = c.get('userEmail');
-  const { to, subject, body, accountId } = await c.req.json<{ to: string; subject: string; body: string; accountId?: number }>();
+  const { to, subject, body, accountId, messageId } = await c.req.json<{ to: string; subject: string; body: string; accountId?: number; messageId?: number }>();
 
   if (!to || !subject || !body) return c.json({ error: 'Missing to, subject, or body' }, 400);
+
+  // Enforce approval: if messageId is provided, check that the email has been approved
+  if (messageId) {
+    const msg = await c.env.DB.prepare(
+      'SELECT approval_status FROM persona_messages WHERE id = ? AND user_email = ?'
+    ).bind(messageId, email).first() as any;
+    if (msg && msg.approval_status !== 'approved') {
+      return c.json({ error: 'Email must be approved before sending. Please review and approve the email first.' }, 403);
+    }
+  }
+
   const { clientId: gci, clientSecret: gcs } = await getGoogleCreds(c.env.DB, c.env);
   if (!gci || !gcs) return c.json({ error: 'Gmail not configured. Use the Connect Gmail wizard to enter credentials.' }, 500);
 
@@ -2408,6 +2487,7 @@ app.post('/api/gmail/send-campaign/:campaignId', async (c) => {
   for (const eid of emailIds.slice(0, 10)) { // Max 10 per batch
     const em = await c.env.DB.prepare('SELECT * FROM campaign_emails WHERE id = ? AND campaign_id = ?').bind(eid, campaignId).first() as any;
     if (!em) { results.push({ id: eid, status: 'not_found' }); continue; }
+    if (em.approval_status !== 'approved') { results.push({ id: eid, status: 'not_approved', error: 'Email not approved — only approved emails can be sent' }); continue; }
 
     const bodyText = (em.content || '').replace(/^Subject:.*\n*/im, '').replace(/<[^>]+>/g, '').replace(/&amp;/g, '&');
     const rawEmail = [`From: ${from}`, `To: ${toField}`, `Subject: ${em.subject}`, `Content-Type: text/plain; charset=utf-8`, '', bodyText].join('\r\n');
@@ -2541,6 +2621,9 @@ app.post('/api/campaigns/:id/generate', async (c) => {
   const campaignId = c.req.param('id');
   const email = c.get('userEmail');
 
+  const body = await c.req.json().catch(() => ({})) as any;
+  const generateAll = body.all === true;
+
   const campaign = await c.env.DB.prepare(
     'SELECT * FROM campaigns WHERE id = ? AND user_email = ?'
   ).bind(campaignId, email).first() as any;
@@ -2561,7 +2644,7 @@ app.post('/api/campaigns/:id/generate', async (c) => {
   const generatedIds = new Set(alreadyGenerated.results.map((r: any) => r.account_id));
 
   const pendingIds = accountIds.filter(id => !generatedIds.has(id));
-  const batchIds = pendingIds.slice(0, 2); // 2 at a time (full live research per email)
+  const batchIds = generateAll ? pendingIds : pendingIds.slice(0, 2); // all remaining or 2 at a time
 
   if (!batchIds.length) {
     await c.env.DB.prepare('UPDATE campaigns SET status = ? WHERE id = ?').bind('complete', campaignId).run();
@@ -2738,16 +2821,37 @@ ${campaign.custom_context ? '\nCAMPAIGN CONTEXT: ' + campaign.custom_context : '
   });
 });
 
-// Get campaign emails
+// Get campaign emails (also returns pending accounts)
 app.get('/api/campaigns/:id/emails', async (c) => {
   const campaignId = c.req.param('id');
   const email = c.get('userEmail');
-  const campaign = await c.env.DB.prepare('SELECT * FROM campaigns WHERE id = ? AND user_email = ?').bind(campaignId, email).first();
+  const campaign = await c.env.DB.prepare('SELECT * FROM campaigns WHERE id = ? AND user_email = ?').bind(campaignId, email).first() as any;
   if (!campaign) return c.json({ error: 'Campaign not found' }, 404);
   const emails = await c.env.DB.prepare(
-    'SELECT * FROM campaign_emails WHERE campaign_id = ? ORDER BY created_at ASC'
+    `SELECT ce.*, a.website, a.website_domain, a.industry, a.billing_city, a.billing_state, a.billing_country, a.account_status, a.total_it_spend, a.cdn_primary, a.security_primary, a.current_monthly_fee
+     FROM campaign_emails ce
+     LEFT JOIN accounts a ON ce.account_id = a.id
+     WHERE ce.campaign_id = ?
+     ORDER BY ce.created_at ASC`
   ).bind(campaignId).all();
-  return c.json({ campaign, emails: emails.results });
+
+  // Compute pending accounts (those without generated emails)
+  const filterData = JSON.parse(campaign.filters || '{}');
+  const accountIds: number[] = filterData.accountIds || [];
+  const generatedAccountIds = new Set(emails.results.map((e: any) => e.account_id));
+  const pendingIds = accountIds.filter(id => !generatedAccountIds.has(id));
+
+  // Fetch names for pending accounts
+  let pendingAccounts: any[] = [];
+  if (pendingIds.length > 0) {
+    const placeholders = pendingIds.map(() => '?').join(',');
+    const pendingResult = await c.env.DB.prepare(
+      `SELECT id, account_name, website FROM accounts WHERE id IN (${placeholders}) AND user_email = ?`
+    ).bind(...pendingIds, email).all();
+    pendingAccounts = pendingResult.results;
+  }
+
+  return c.json({ campaign, emails: emails.results, pendingAccounts });
 });
 
 // Export campaign as CSV
@@ -2767,6 +2871,178 @@ app.get('/api/campaigns/:id/export', async (c) => {
   }
 
   return new Response(csv, { headers: { 'Content-Type': 'text/csv', 'Content-Disposition': `attachment; filename="campaign-${campaignId}.csv"` } });
+});
+
+// Regenerate email for a single account (retry for stuck/failed accounts)
+app.post('/api/campaigns/:id/regenerate/:accountId', async (c) => {
+  const campaignId = c.req.param('id');
+  const accountId = parseInt(c.req.param('accountId'));
+  const email = c.get('userEmail');
+
+  const campaign = await c.env.DB.prepare(
+    'SELECT * FROM campaigns WHERE id = ? AND user_email = ?'
+  ).bind(campaignId, email).first() as any;
+  if (!campaign) return c.json({ error: 'Campaign not found' }, 404);
+
+  const account = await c.env.DB.prepare(
+    'SELECT * FROM accounts WHERE id = ? AND user_email = ?'
+  ).bind(accountId, email).first() as any;
+  if (!account) return c.json({ error: 'Account not found' }, 404);
+
+  const themeConfig = CAMPAIGN_THEMES[campaign.theme];
+  const personaConfig = PERSONA_CONFIGS[campaign.persona];
+  if (!themeConfig || !personaConfig) return c.json({ error: 'Invalid campaign config' }, 400);
+
+  // Delete any existing email for this account in this campaign (allows re-generation)
+  await c.env.DB.prepare(
+    'DELETE FROM campaign_emails WHERE campaign_id = ? AND account_id = ?'
+  ).bind(campaignId, accountId).run();
+
+  await c.env.DB.prepare('UPDATE campaigns SET status = ? WHERE id = ?').bind('generating', campaignId).run();
+
+  const a = account;
+  const ctx = buildAccountContext(a);
+  const competitors = getCompetitorMapping(a);
+  const competitorCtx = competitors.length > 0
+    ? '\nDETECTED COMPETITORS:\n' + competitors.map(m => `- ${m.competitor} (${m.category}) -> CF: ${m.cfProducts.join(', ')}\n  Edge: ${m.pitch}`).join('\n')
+    : '';
+
+  const allProds = [a.cdn_products, a.security_products, a.dns_products, a.cloud_hosting_products].filter(Boolean).join(';').toLowerCase();
+  const displacementLines: string[] = [];
+  for (const [catKey, cat] of Object.entries(CF_PRODUCT_CATALOG)) {
+    for (const comp of cat.competitors) {
+      if (allProds.includes(comp.key) || allProds.includes(comp.name.toLowerCase())) {
+        displacementLines.push(`${comp.name} (${cat.category}) -> Replace with: ${cat.products.slice(0,2).map(p=>p.name).join(', ')} — ${cat.products[0]?.desc || ''}`);
+      }
+    }
+  }
+  const displacementCtx = displacementLines.length ? '\nVENDOR DISPLACEMENT MAP:\n' + displacementLines.map(l => '- ' + l).join('\n') : '';
+
+  const cdnS = a.cdn_spend || 0, secS = a.security_spend || 0, dnsS = a.dns_spend || 0;
+  const totalDisplaceable = cdnS + secS + dnsS;
+  const annualSavings = Math.round(totalDisplaceable * 0.3 * 12);
+  const costCtx = totalDisplaceable > 0 ? `\nCOST OF INACTION: $${annualSavings.toLocaleString()}/year in potential savings. CDN: $${cdnS.toLocaleString()}/mo (${a.cdn_primary||'unknown'}), Security: $${secS.toLocaleString()}/mo (${a.security_primary||'unknown'}), DNS: $${dnsS.toLocaleString()}/mo (${a.dns_primary||'unknown'}).` : '';
+
+  const domain = String(a.website || a.website_domain || '');
+  const companyName = String(a.account_name);
+  const cleanDomain = domain.replace(/^https?:\/\//, '').replace(/\/.*/, '');
+
+  const [websiteData, newsData, secData, fundingData] = await Promise.all([
+    (async () => {
+      const result = { desc: '', about: '', ir: '', title: '' };
+      const pages = [
+        { url: `https://${cleanDomain}`, key: 'desc' },
+        { url: `https://${cleanDomain}/about`, key: 'about' },
+        { url: `https://${cleanDomain}/investors`, key: 'ir' },
+      ];
+      for (const pg of pages) {
+        try {
+          const r = await fetch(pg.url, { headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36', 'Accept': 'text/html' }, signal: AbortSignal.timeout(5000), redirect: 'follow' });
+          if (!r.ok) continue;
+          const html = await r.text();
+          const text = html.replace(/<script[^>]*>[\s\S]*?<\/script>/gi,'').replace(/<style[^>]*>[\s\S]*?<\/style>/gi,'').replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').trim();
+          if (pg.key === 'desc') {
+            const metaM = html.match(/<meta[^>]*name=["']description["'][^>]*content=["'](.*?)["']/is);
+            if (metaM) result.desc = metaM[1].trim().slice(0, 300);
+            const titleM = html.match(/<title[^>]*>(.*?)<\/title>/is);
+            if (titleM) result.title = titleM[1].replace(/<[^>]+>/g,'').trim().slice(0, 150);
+          } else if (pg.key === 'about') {
+            result.about = text.slice(0, 1500);
+          } else if (pg.key === 'ir') {
+            result.ir = text.slice(0, 1500);
+          }
+        } catch (_) {}
+      }
+      return result;
+    })(),
+    searchNews(companyName),
+    fetchSECFilings(companyName),
+    searchFunding(companyName, domain),
+  ]);
+
+  let publicIntel = '';
+  if (websiteData.desc) publicIntel += `\nFROM THEIR WEBSITE: "${websiteData.desc}"`;
+  if (websiteData.about) publicIntel += `\nABOUT PAGE (their own words):\n${websiteData.about.slice(0, 800)}`;
+  if (websiteData.ir) publicIntel += `\nINVESTOR RELATIONS PAGE:\n${websiteData.ir.slice(0, 800)}`;
+  if (newsData) publicIntel += `\nRECENT NEWS HEADLINES:\n${newsData}`;
+  if (secData.filings) publicIntel += `\nSEC FILINGS:\n${secData.filings.slice(0, 500)}`;
+  if (fundingData) publicIntel += `\nFUNDING DATA:\n${fundingData.slice(0, 400)}`;
+
+  const system = `You are a ${personaConfig.title} at Cloudflare writing a hyper-personalized campaign email.
+PERSONA: ${personaConfig.name} — ${personaConfig.description}
+TONE: ${personaConfig.tone}
+CAMPAIGN THEME: ${themeConfig.name}
+
+CRITICAL: This email must feel like you spent an HOUR researching this specific account. You MUST reference:
+1. What the company does IN THEIR OWN WORDS (from their website/about page)
+2. Recent news about them — earnings announcements, leadership changes, acquisitions, partnerships, security incidents, product launches. If news was found, weave it into the narrative naturally.
+3. Their investor relations content or SEC filings — revenue trends, strategic priorities mentioned in earnings calls, risk factors
+4. Any funding rounds or investment activity
+5. Their current vendor stack BY NAME with spend amounts
+6. Specific Cloudflare products that replace each vendor, with concrete advantages
+7. Quantified cost of inaction with their real spend numbers
+
+If they had a security breach/incident in the news, lead with that. If they announced earnings, reference their stated priorities. If they raised funding, connect Cloudflare to their growth plans. If they changed leadership, position this as a fresh start.
+
+${themeConfig.prompt}
+
+Start with: Subject: [highly personalized subject referencing something specific about them — a news headline, their mission, or a concrete finding]
+Keep it 300-400 words. Every sentence must be specific to THIS account.
+
+ABSOLUTE RULES FOR THE OUTPUT:
+- NEVER include any meta-instructions, internal notes, or system text in the email (no "N/A", "No data found", "use CRM data", "no public data", "not available", etc.)
+- If a data point is missing, simply DO NOT mention it. Skip it entirely. Do not say "data not available" or "unknown".
+- The output must read as a polished, professional email from a real human. Zero indication that it was AI-generated or that data was missing.
+- Do not reference "CRM data", "live probe", "scraped", "AI", or any internal tooling. Write as if you personally researched this company.`;
+
+  const prompt = `Generate a hyper-personalized ${themeConfig.name} email for ${a.account_name}:
+
+ACCOUNT PROFILE:
+${ctx}
+${competitorCtx}
+${displacementCtx}
+${costCtx}
+
+PUBLIC INTELLIGENCE (live-gathered):
+${publicIntel || ''}
+
+CLOUDFLARE PLATFORM EDGE:
+- Network: 330+ cities, 100+ Tbps, sub-50ms global latency
+- Pricing: Flat-rate, no bandwidth charges, zero egress (R2)
+- Platform: CDN + Security + Zero Trust + DNS + Compute + Storage — one vendor
+- Analyst: Gartner SSE Leader, Forrester WAF/CDN/DDoS Leader
+- Innovation: Birthday Week, Security Week, GA Week ship dozens of features quarterly
+${campaign.custom_context ? '\nCAMPAIGN CONTEXT: ' + campaign.custom_context : ''}`;
+
+  try {
+    const content = await runAI(c.env.AI, EMAIL_MODEL, system, prompt);
+    const subject = content.match(/Subject:?\s*(.+?)(?:\n|$)/i)?.[1]?.trim() || `${themeConfig.name} - ${a.account_name}`;
+
+    await c.env.DB.prepare(
+      'INSERT INTO campaign_emails (campaign_id, account_id, account_name, subject, content, status) VALUES (?, ?, ?, ?, ?, ?)'
+    ).bind(campaignId, a.id, a.account_name, subject, content, 'generated').run();
+
+    // Recount generated emails
+    const genCount = await c.env.DB.prepare(
+      'SELECT COUNT(*) as cnt FROM campaign_emails WHERE campaign_id = ?'
+    ).bind(campaignId).first() as any;
+    const newGenCount = genCount?.cnt || 0;
+    const filterData = JSON.parse(campaign.filters || '{}');
+    const totalIds = (filterData.accountIds || []).length;
+    const isComplete = newGenCount >= totalIds;
+
+    await c.env.DB.prepare('UPDATE campaigns SET generated = ?, status = ? WHERE id = ?')
+      .bind(newGenCount, isComplete ? 'complete' : 'generating', campaignId).run();
+
+    return c.json({ status: 'generated', accountId: a.id, accountName: a.account_name, subject, generated: newGenCount, total: totalIds });
+  } catch (e: any) {
+    // Reset status back from 'generating' if it was the only one
+    const filterData = JSON.parse(campaign.filters || '{}');
+    const totalIds = (filterData.accountIds || []).length;
+    await c.env.DB.prepare('UPDATE campaigns SET status = ? WHERE id = ?')
+      .bind(campaign.generated >= totalIds ? 'complete' : 'draft', campaignId).run();
+    return c.json({ status: 'error', accountId: a.id, accountName: a.account_name, error: e.message }, 500);
+  }
 });
 
 // ══════════════════════════════════════════════════════════════════

@@ -82,6 +82,18 @@ function md(s){if(!s)return'';
   .replace(/^&gt; (.+)$/gm,'<blockquote>$1</blockquote>')
   .replace(/---/g,'<hr>').replace(/\n\n/g,'</p><p>').replace(/^(?!<[huloba])(.+)$/gm,'<p>$1</p>').replace(/<p><\/p>/g,'');}
 
+// ── Email Approval Helpers ─────────────────────────────────────────
+function getApprovalLabel(status) {
+  if (status === 'approved') return 'Approved';
+  if (status === 'rejected') return 'Rejected';
+  return 'Pending Approval';
+}
+function getApprovalDescription(status) {
+  if (status === 'approved') return 'This email has been approved and is ready to send.';
+  if (status === 'rejected') return 'This email has been rejected and will not be sent.';
+  return 'Review the email content and recipient before approving.';
+}
+
 // ── Router ─────────────────────────────────────────────────────────
 function navigate(){
   const h=location.hash||'#/';const m=$('#main');
@@ -1161,8 +1173,57 @@ async function generateEmail(a, cache) {
 
   if (cache) cache.lastResult = r;
 
+  // Store message ID and approval status for approval workflow
+  var messageId = r.id;
+  var approvalStatus = r.approval_status || 'pending_approval';
+
   // Build email HTML using string concatenation (no template literals)
   var h = '<div class="email-preview slide-up">';
+
+  // Recipient info card — shows WHO this email targets using available account data
+  var locationParts = [];
+  if (a.billing_city) locationParts.push(a.billing_city);
+  if (a.billing_state) locationParts.push(a.billing_state);
+  if (a.billing_country) locationParts.push(a.billing_country);
+  var locationStr = locationParts.join(', ') || 'Unknown location';
+
+  h += '<div class="approval-recipient-card">';
+  h += '<div class="approval-recipient-header">';
+  h += '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>';
+  h += ' Recipient';
+  h += '</div>';
+  h += '<div class="approval-recipient-body">';
+  h += '<div class="approval-recipient-name">' + a.account_name + '</div>';
+  h += '<div class="approval-recipient-details">';
+  if (a.website || a.website_domain) h += '<span>' + (a.website || a.website_domain) + '</span>';
+  if (a.industry) h += '<span>' + a.industry + '</span>';
+  h += '<span>' + locationStr + '</span>';
+  h += '</div>';
+  h += '<div class="approval-recipient-meta">';
+  if (a.account_status) h += '<span class="approval-meta-chip' + (a.account_status === 'Active' ? ' chip-active' : '') + '">' + a.account_status + '</span>';
+  if (a.total_it_spend) h += '<span class="approval-meta-chip">IT Spend: ' + fmtD(a.total_it_spend) + '/mo</span>';
+  if (a.cdn_primary) h += '<span class="approval-meta-chip">CDN: ' + a.cdn_primary + '</span>';
+  if (a.security_primary) h += '<span class="approval-meta-chip">Security: ' + a.security_primary + '</span>';
+  h += '</div>';
+  h += '</div></div>';
+
+  // Approval status bar
+  h += '<div class="approval-status-bar" id="approval-bar" data-status="' + approvalStatus + '">';
+  h += '<div class="approval-status-left">';
+  h += '<span class="approval-badge approval-' + approvalStatus + '" id="approval-badge">' + getApprovalLabel(approvalStatus) + '</span>';
+  h += '<span class="approval-status-text" id="approval-text">' + getApprovalDescription(approvalStatus) + '</span>';
+  h += '</div>';
+  h += '<div class="approval-actions" id="approval-actions">';
+  if (approvalStatus === 'pending_approval') {
+    h += '<button class="btn btn-sm approval-approve-btn" id="approve-btn">Approve</button>';
+    h += '<button class="btn btn-sm approval-reject-btn" id="reject-btn">Reject</button>';
+  } else if (approvalStatus === 'approved') {
+    h += '<button class="btn btn-sm approval-reject-btn" id="reject-btn">Revoke Approval</button>';
+  } else if (approvalStatus === 'rejected') {
+    h += '<button class="btn btn-sm approval-approve-btn" id="approve-btn">Approve</button>';
+  }
+  h += '</div></div>';
+
   h += '<div class="email-toolbar"><div class="email-dot r"></div><div class="email-dot y"></div><div class="email-dot g"></div>';
   h += '<span style="margin-left:auto;font-size:11px;color:var(--text-muted);font-weight:600">' + p.name + ' / ' + msgLabel + '</span></div>';
   h += '<div class="email-subject-bar">';
@@ -1178,7 +1239,11 @@ async function generateEmail(a, cache) {
     h += '<button class="btn btn-primary btn-sm" onclick="copyEl(this,\'email\')">' + IC.copy + ' Copy Email</button>';
     h += '<button class="btn btn-ghost btn-sm" onclick="copyEl(this,\'subject\')" data-subject="' + subject.replace(/"/g, '&quot;') + '">' + IC.mail + ' Copy Subject</button>';
     if (window._gmailConnected) {
-      h += '<button class="btn btn-sm" style="background:linear-gradient(135deg,#34d399,#10b981);color:#fff" id="send-gmail" data-subject="' + subject.replace(/"/g, '&quot;') + '">' + IC.send + ' Send via Gmail</button>';
+      var sendDisabled = approvalStatus !== 'approved' ? ' disabled title="Approve this email before sending"' : '';
+      var sendStyle = approvalStatus === 'approved'
+        ? 'background:linear-gradient(135deg,#34d399,#10b981);color:#fff'
+        : 'background:var(--bg-tertiary);color:var(--text-muted);cursor:not-allowed;opacity:0.6';
+      h += '<button class="btn btn-sm" style="' + sendStyle + '" id="send-gmail" data-subject="' + subject.replace(/"/g, '&quot;') + '"' + sendDisabled + '>' + IC.send + (approvalStatus === 'approved' ? ' Send via Gmail' : ' Approve to Send') + '</button>';
     } else {
       h += '<a href="/api/gmail/connect" target="_blank" class="btn btn-ghost btn-sm">' + IC.mail + ' Connect Gmail to Send</a>';
     }
@@ -1189,9 +1254,100 @@ async function generateEmail(a, cache) {
   if (cache) cache.outputHTML = h;
   mo.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
+  // Approval button handlers
+  function updateApprovalUI(newStatus) {
+    approvalStatus = newStatus;
+    var badge = document.getElementById('approval-badge');
+    var text = document.getElementById('approval-text');
+    var bar = document.getElementById('approval-bar');
+    var actions = document.getElementById('approval-actions');
+    var gmailBtn = document.getElementById('send-gmail');
+
+    if (badge) { badge.className = 'approval-badge approval-' + newStatus; badge.textContent = getApprovalLabel(newStatus); }
+    if (text) text.textContent = getApprovalDescription(newStatus);
+    if (bar) bar.setAttribute('data-status', newStatus);
+
+    // Update action buttons
+    if (actions) {
+      var ah = '';
+      if (newStatus === 'pending_approval') {
+        ah = '<button class="btn btn-sm approval-approve-btn" id="approve-btn">Approve</button>';
+        ah += '<button class="btn btn-sm approval-reject-btn" id="reject-btn">Reject</button>';
+      } else if (newStatus === 'approved') {
+        ah = '<button class="btn btn-sm approval-reject-btn" id="reject-btn">Revoke Approval</button>';
+      } else if (newStatus === 'rejected') {
+        ah = '<button class="btn btn-sm approval-approve-btn" id="approve-btn">Approve</button>';
+      }
+      actions.innerHTML = ah;
+      bindApprovalButtons();
+    }
+
+    // Update Gmail send button state
+    if (gmailBtn) {
+      if (newStatus === 'approved') {
+        gmailBtn.disabled = false;
+        gmailBtn.style.cssText = 'background:linear-gradient(135deg,#34d399,#10b981);color:#fff';
+        gmailBtn.innerHTML = IC.send + ' Send via Gmail';
+        gmailBtn.title = '';
+      } else {
+        gmailBtn.disabled = true;
+        gmailBtn.style.cssText = 'background:var(--bg-tertiary);color:var(--text-muted);cursor:not-allowed;opacity:0.6';
+        gmailBtn.innerHTML = IC.send + ' Approve to Send';
+        gmailBtn.title = 'Approve this email before sending';
+      }
+    }
+  }
+
+  function bindApprovalButtons() {
+    var approveBtn = document.getElementById('approve-btn');
+    var rejectBtn = document.getElementById('reject-btn');
+    if (approveBtn) {
+      approveBtn.addEventListener('click', function() {
+        approveBtn.disabled = true;
+        approveBtn.textContent = 'Approving...';
+        fetch('/api/messages/' + messageId + '/approve', { method: 'POST', headers: { 'Content-Type': 'application/json' } })
+          .then(function(r) { return r.json(); })
+          .then(function(d) {
+            if (d.success) {
+              updateApprovalUI('approved');
+              toast('Email approved and ready to send', 'success');
+            } else {
+              toast('Failed to approve: ' + (d.error || 'Unknown error'), 'error');
+              approveBtn.disabled = false;
+              approveBtn.textContent = 'Approve';
+            }
+          }).catch(function(e) { toast('Error: ' + e.message, 'error'); approveBtn.disabled = false; approveBtn.textContent = 'Approve'; });
+      });
+    }
+    if (rejectBtn) {
+      rejectBtn.addEventListener('click', function() {
+        rejectBtn.disabled = true;
+        rejectBtn.textContent = 'Rejecting...';
+        fetch('/api/messages/' + messageId + '/reject', { method: 'POST', headers: { 'Content-Type': 'application/json' } })
+          .then(function(r) { return r.json(); })
+          .then(function(d) {
+            if (d.success) {
+              updateApprovalUI('rejected');
+              toast('Email rejected', 'success');
+            } else {
+              toast('Failed to reject: ' + (d.error || 'Unknown error'), 'error');
+              rejectBtn.disabled = false;
+              rejectBtn.textContent = 'Reject';
+            }
+          }).catch(function(e) { toast('Error: ' + e.message, 'error'); rejectBtn.disabled = false; rejectBtn.textContent = 'Reject'; });
+      });
+    }
+  }
+  bindApprovalButtons();
+
+  // Gmail send handler — now includes messageId for backend approval check
   var sendGmailBtn = document.getElementById('send-gmail');
   if (sendGmailBtn) {
     sendGmailBtn.addEventListener('click', function() {
+      if (approvalStatus !== 'approved') {
+        toast('Please approve this email before sending', 'error');
+        return;
+      }
       var subj = sendGmailBtn.getAttribute('data-subject') || '';
       var bodyEl = mo.querySelector('.email-body');
       var bodyText = bodyEl ? bodyEl.innerText : '';
@@ -1202,11 +1358,11 @@ async function generateEmail(a, cache) {
       fetch('/api/gmail/send', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ to: toAddr, subject: subj, body: bodyText, accountId: a.id }),
+        body: JSON.stringify({ to: toAddr, subject: subj, body: bodyText, accountId: a.id, messageId: messageId }),
       }).then(function(r) { return r.json(); }).then(function(d) {
         if (d.success) {
           sendGmailBtn.innerHTML = '\u2713 Sent!';
-          sendGmailBtn.style.background = 'var(--green)';
+          sendGmailBtn.style.cssText = 'background:var(--green);color:#fff';
           toast('Email sent to ' + toAddr, 'success');
         } else {
           sendGmailBtn.innerHTML = IC.send + ' Failed';
@@ -1278,13 +1434,15 @@ function renderCampaigns(c) {
       for (var i = 0; i < campaigns.length; i++) {
         var cp = campaigns[i];
         var th = themes[cp.theme] || {};
-        var statusColor = cp.status === 'complete' ? 'var(--green)' : cp.status === 'generating' ? 'var(--amber)' : 'var(--text-muted)';
+        var isComplete = cp.generated >= cp.total_accounts;
+        var statusColor = isComplete ? 'var(--green)' : cp.generated > 0 ? 'var(--amber)' : 'var(--text-muted)';
+        var statusLabel = isComplete ? 'complete' : cp.generated > 0 ? (cp.total_accounts - cp.generated) + ' remaining' : 'draft';
         h += '<a href="#/campaign/' + cp.id + '" style="text-decoration:none;display:block" class="d-card" style="margin-bottom:12px">';
         h += '<div style="display:flex;align-items:center;justify-content:space-between">';
         h += '<div><div style="font-size:15px;font-weight:700;color:var(--text-primary)">' + (th.icon || '') + ' ' + cp.name + '</div>';
         h += '<div style="font-size:12px;color:var(--text-muted);margin-top:4px">' + (th.name || cp.theme) + ' &middot; ' + (cp.persona || '').toUpperCase() + ' &middot; ' + cp.total_accounts + ' accounts</div></div>';
         h += '<div style="text-align:right"><div style="font-size:14px;font-weight:700;color:' + statusColor + '">' + cp.generated + '/' + cp.total_accounts + '</div>';
-        h += '<div style="font-size:11px;color:var(--text-muted)">' + cp.status + '</div></div>';
+        h += '<div style="font-size:11px;color:' + (isComplete ? 'var(--text-muted)' : statusColor) + '">' + statusLabel + '</div></div>';
         h += '</div></a>';
       }
       h += '<div style="margin-bottom:32px"></div>';
@@ -1569,11 +1727,13 @@ function renderCampaignDetail(c, id) {
   api.get('/campaigns/' + id + '/emails').then(function(data) {
     var cp = data.campaign;
     var emails = data.emails;
+    var pendingAccounts = data.pendingAccounts || [];
 
     var h = '<div class="fade-in">';
     h += '<a href="#/campaigns" class="back-link">' + IC.back + ' All Campaigns</a>';
 
     // Campaign header
+    var statusColor = cp.generated >= cp.total_accounts ? 'var(--green)' : 'var(--amber)';
     h += '<div class="acct-hero">';
     h += '<div class="acct-hero-top"><div>';
     h += '<h1 class="acct-name">' + cp.name + '</h1>';
@@ -1582,29 +1742,128 @@ function renderCampaignDetail(c, id) {
     h += '<span class="acct-meta-item">' + (cp.persona || '').toUpperCase() + ' / ' + cp.message_type + '</span>';
     h += '<span class="acct-meta-item">' + cp.total_accounts + ' accounts</span>';
     h += '</div></div>';
-    h += '<div style="text-align:right"><div class="acct-kpi-value green">' + cp.generated + '/' + cp.total_accounts + '</div><div style="font-size:11px;color:var(--text-muted)">generated</div></div>';
+    h += '<div style="text-align:right"><div class="acct-kpi-value" style="color:' + statusColor + '">' + cp.generated + '/' + cp.total_accounts + '</div><div style="font-size:11px;color:var(--text-muted)">generated</div></div>';
     h += '</div></div>';
 
-    // Generate button
-    if (cp.generated < cp.total_accounts) {
-      h += '<button class="btn btn-primary btn-lg" id="gen-batch-btn" style="width:100%;justify-content:center;padding:14px 24px;font-size:15px;margin-bottom:8px">' + IC.sparkles + ' Generate Next Batch (2 emails with full live research)</button>';
-      h += '<div id="gen-progress" style="margin-bottom:24px"></div>';
+    // Action banner for incomplete campaigns
+    if (pendingAccounts.length > 0) {
+      h += '<div class="d-card" style="border-color:var(--border-accent);margin-bottom:16px;padding:16px 20px">';
+      h += '<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">';
+      h += '<div>';
+      h += '<div style="font-size:14px;font-weight:700;color:var(--amber)">' + pendingAccounts.length + ' email' + (pendingAccounts.length > 1 ? 's' : '') + ' not yet generated</div>';
+      h += '<div style="font-size:12px;color:var(--text-muted);margin-top:2px">Click below to generate remaining emails, or retry individually</div>';
+      h += '</div>';
+      h += '<div style="display:flex;gap:8px;flex-shrink:0">';
+      h += '<button class="btn btn-primary" id="gen-all-btn" style="padding:10px 20px;font-size:14px">' + IC.sparkles + ' Generate All Remaining (' + pendingAccounts.length + ')</button>';
+      h += '<button class="btn btn-ghost" id="gen-batch-btn" style="padding:10px 16px;font-size:13px">' + IC.sparkles + ' Next Batch (2)</button>';
+      h += '</div>';
+      h += '</div>';
+      h += '<div id="gen-progress" style="margin-top:12px"></div>';
+      h += '</div>';
+
+      // Pending accounts list
+      h += '<div class="persona-section-title" style="margin-bottom:8px">Pending Accounts</div>';
+      for (var p = 0; p < pendingAccounts.length; p++) {
+        var pa = pendingAccounts[p];
+        h += '<div class="d-card" style="margin-bottom:8px;padding:12px 16px;display:flex;align-items:center;justify-content:space-between;border-color:rgba(251,191,36,0.2)">';
+        h += '<div style="display:flex;align-items:center;gap:10px">';
+        h += '<div style="width:8px;height:8px;border-radius:50%;background:var(--amber);flex-shrink:0"></div>';
+        h += '<div><div style="font-size:13px;font-weight:600;color:var(--text-primary)">' + pa.account_name + '</div>';
+        if (pa.website) h += '<div style="font-size:11px;color:var(--text-muted)">' + pa.website + '</div>';
+        h += '</div></div>';
+        h += '<button class="btn btn-ghost btn-sm retry-single-btn" data-account-id="' + pa.id + '" data-account-name="' + (pa.account_name || '').replace(/"/g, '&quot;') + '" style="font-size:12px;padding:6px 12px">' + IC.sparkles + ' Generate</button>';
+        h += '</div>';
+      }
+      h += '<div style="margin-bottom:24px"></div>';
     }
 
-    // Export button
+    // Approval summary + bulk actions
     if (emails.length) {
+      var approvedCount = emails.filter(function(e) { return e.approval_status === 'approved'; }).length;
+      var rejectedCount = emails.filter(function(e) { return e.approval_status === 'rejected'; }).length;
+      var pendingApprovalCount = emails.filter(function(e) { return !e.approval_status || e.approval_status === 'pending_approval'; }).length;
+
+      h += '<div class="d-card" style="margin-bottom:16px;padding:16px 20px">';
+      h += '<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">';
+      h += '<div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">';
+      h += '<span class="persona-section-title" style="margin:0;font-size:13px">Email Approval</span>';
+      h += '<span class="approval-badge approval-approved" style="font-size:11px">' + approvedCount + ' Approved</span>';
+      h += '<span class="approval-badge approval-pending_approval" style="font-size:11px">' + pendingApprovalCount + ' Pending</span>';
+      if (rejectedCount > 0) h += '<span class="approval-badge approval-rejected" style="font-size:11px">' + rejectedCount + ' Rejected</span>';
+      h += '</div>';
+      h += '<div style="display:flex;gap:8px;flex-wrap:wrap">';
+      if (pendingApprovalCount > 0) {
+        h += '<button class="btn btn-sm approval-approve-btn" id="bulk-approve-btn">Approve All Pending (' + pendingApprovalCount + ')</button>';
+        h += '<button class="btn btn-sm approval-reject-btn" id="bulk-reject-btn">Reject All Pending</button>';
+      }
+      h += '</div>';
+      h += '</div>';
+
+      // Filter tabs
+      h += '<div style="display:flex;gap:6px;margin-top:12px">';
+      h += '<button class="btn btn-ghost btn-sm camp-filter-btn" data-filter="all" style="font-size:11px">All (' + emails.length + ')</button>';
+      h += '<button class="btn btn-ghost btn-sm camp-filter-btn" data-filter="pending_approval" style="font-size:11px">Pending (' + pendingApprovalCount + ')</button>';
+      h += '<button class="btn btn-ghost btn-sm camp-filter-btn" data-filter="approved" style="font-size:11px">Approved (' + approvedCount + ')</button>';
+      if (rejectedCount > 0) h += '<button class="btn btn-ghost btn-sm camp-filter-btn" data-filter="rejected" style="font-size:11px">Rejected (' + rejectedCount + ')</button>';
+      h += '</div>';
+      h += '</div>';
+
+      // Export + actions
       h += '<div style="display:flex;gap:8px;margin-bottom:24px">';
       h += '<a href="/api/campaigns/' + id + '/export" class="btn btn-ghost">' + IC.copy + ' Export CSV</a>';
       h += '<button class="btn btn-ghost" id="copy-all-btn">' + IC.copy + ' Copy All Emails</button>';
       h += '</div>';
     }
 
-    // Email list
+    // Email list with recipient info + approval controls
     h += '<div class="persona-section-title">Generated Emails (' + emails.length + ')</div>';
+    h += '<div id="campaign-email-list">';
     for (var i = 0; i < emails.length; i++) {
       var e = emails[i];
+      var eApproval = e.approval_status || 'pending_approval';
       var body = (e.content || '').replace(/^Subject:.*\n*/im, '');
-      h += '<div class="email-preview" style="margin-bottom:14px">';
+
+      // Build location string from account data
+      var eLoc = [];
+      if (e.billing_city) eLoc.push(e.billing_city);
+      if (e.billing_state) eLoc.push(e.billing_state);
+      if (e.billing_country) eLoc.push(e.billing_country);
+      var eLocStr = eLoc.join(', ') || '';
+
+      h += '<div class="email-preview camp-email-card" data-approval="' + eApproval + '" data-email-id="' + e.id + '" style="margin-bottom:14px">';
+
+      // Recipient info bar
+      h += '<div class="approval-recipient-card compact">';
+      h += '<div class="approval-recipient-body" style="padding:10px 16px">';
+      h += '<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">';
+      h += '<div>';
+      h += '<div class="approval-recipient-name" style="font-size:14px">' + e.account_name + '</div>';
+      h += '<div class="approval-recipient-details" style="margin-top:2px">';
+      if (e.website || e.website_domain) h += '<span>' + (e.website || e.website_domain) + '</span>';
+      if (e.industry) h += '<span>' + e.industry + '</span>';
+      if (eLocStr) h += '<span>' + eLocStr + '</span>';
+      h += '</div>';
+      if (e.total_it_spend || e.account_status) {
+        h += '<div class="approval-recipient-meta" style="margin-top:4px">';
+        if (e.account_status) h += '<span class="approval-meta-chip' + (e.account_status === 'Active' ? ' chip-active' : '') + '">' + e.account_status + '</span>';
+        if (e.total_it_spend) h += '<span class="approval-meta-chip">IT Spend: ' + fmtD(e.total_it_spend) + '/mo</span>';
+        if (e.cdn_primary) h += '<span class="approval-meta-chip">CDN: ' + e.cdn_primary + '</span>';
+        h += '</div>';
+      }
+      h += '</div>';
+      // Per-email approval badge + actions
+      h += '<div style="display:flex;align-items:center;gap:8px;flex-shrink:0">';
+      h += '<span class="approval-badge approval-' + eApproval + ' camp-email-badge" data-eid="' + e.id + '">' + getApprovalLabel(eApproval) + '</span>';
+      if (eApproval === 'pending_approval' || eApproval === 'rejected') {
+        h += '<button class="btn btn-sm approval-approve-btn camp-approve-btn" data-eid="' + e.id + '" style="padding:4px 10px;font-size:11px">Approve</button>';
+      }
+      if (eApproval === 'pending_approval' || eApproval === 'approved') {
+        var rejectLabel = eApproval === 'approved' ? 'Revoke' : 'Reject';
+        h += '<button class="btn btn-sm approval-reject-btn camp-reject-btn" data-eid="' + e.id + '" style="padding:4px 10px;font-size:11px">' + rejectLabel + '</button>';
+      }
+      h += '</div>';
+      h += '</div></div></div>';
+
       h += '<div class="email-toolbar"><div class="email-dot r"></div><div class="email-dot y"></div><div class="email-dot g"></div>';
       h += '<span style="margin-left:auto;font-size:11px;color:var(--text-muted);font-weight:600">' + e.account_name + '</span></div>';
       h += '<div class="email-subject-bar"><div class="email-subject-label">Subject</div><div class="email-subject">' + (e.subject || '') + '</div></div>';
@@ -1612,87 +1871,292 @@ function renderCampaignDetail(c, id) {
       h += '<div style="position:absolute;bottom:0;left:0;right:0;height:60px;background:linear-gradient(transparent,var(--bg-surface))"></div>';
       h += '</div>';
       h += '<div class="email-actions"><button class="btn btn-primary btn-sm" onclick="copyEl(this,\'email\')">' + IC.copy + ' Copy</button>';
-      h += '<button class="btn btn-ghost btn-sm" onclick="this.closest(\'.email-preview\').querySelector(\'.email-body\').style.maxHeight=\'none\';this.closest(\'.email-preview\').querySelector(\'.email-body div\').style.display=\'none\';this.textContent=\'Expanded\'">Expand</button></div>';
+      h += '<button class="btn btn-ghost btn-sm" onclick="this.closest(\'.email-preview\').querySelector(\'.email-body\').style.maxHeight=\'none\';this.closest(\'.email-preview\').querySelector(\'.email-body div\').style.display=\'none\';this.textContent=\'Expanded\'">Expand</button>';
+      h += '<button class="btn btn-ghost btn-sm regen-btn" data-email-account-id="' + e.account_id + '" data-email-account-name="' + (e.account_name || '').replace(/"/g, '&quot;') + '" style="color:var(--text-muted)">' + IC.sparkles + ' Regenerate</button>';
+      h += '</div>';
       h += '</div>';
     }
+    h += '</div>';
 
     h += '</div>';
     c.innerHTML = h;
 
-    // Generate batch handler
-    var genBtn = document.getElementById('gen-batch-btn');
-    if (genBtn) {
-      genBtn.addEventListener('click', function runBatch() {
-        genBtn.disabled = true;
-        genBtn.style.display = 'none';
-        var prog = document.getElementById('gen-progress');
-        var pctDone = cp.total_accounts > 0 ? Math.round((cp.generated / cp.total_accounts) * 100) : 0;
-        var remaining = cp.total_accounts - cp.generated;
-        var batchSize = Math.min(2, remaining);
+    // --- Shared generation progress UI helper ---
+    function showGenProgress(prog, label, count, pctDone) {
+      prog.innerHTML = '<div class="d-card" style="border-color:var(--border-accent);overflow:hidden">'
+        + '<div style="display:flex;align-items:center;gap:14px;margin-bottom:20px">'
+        + '<div class="ai-pulse" style="width:40px;height:40px;flex-shrink:0">' + IC.sparkles + '</div>'
+        + '<div style="flex:1"><div style="font-size:15px;font-weight:700;color:var(--text-primary)">' + label + '</div>'
+        + '<div style="font-size:12px;color:var(--text-muted);margin-top:2px">Live research (website, news, SEC, Intricately) + AI generation per account</div></div>'
+        + '</div>'
+        + '<div style="margin-bottom:16px">'
+        + '<div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-muted);margin-bottom:6px"><span>' + cp.generated + ' of ' + cp.total_accounts + ' emails</span><span>' + pctDone + '%</span></div>'
+        + '<div class="progress-bar" style="height:8px"><div class="progress-fill" id="batch-progress-fill" style="width:' + pctDone + '%;transition:width 1s ease"></div></div>'
+        + '</div>'
+        + '<div id="batch-account-status" style="font-size:12px">'
+        + '<div style="display:flex;align-items:center;gap:8px;padding:6px 0;color:var(--text-muted)"><div class="spinner" style="width:12px;height:12px;border-width:1.5px;flex-shrink:0"></div><span>Fetching account data and running live probes...</span></div>'
+        + '</div>'
+        + '</div>';
+      prog.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
 
-        prog.innerHTML = '<div class="d-card" style="border-color:var(--border-accent);overflow:hidden">'
-          // Header
-          + '<div style="display:flex;align-items:center;gap:14px;margin-bottom:20px">'
-          + '<div class="ai-pulse" style="width:40px;height:40px;flex-shrink:0">' + IC.sparkles + '</div>'
-          + '<div style="flex:1"><div style="font-size:15px;font-weight:700;color:var(--text-primary)">Generating ' + batchSize + ' hyper-personalized emails...</div>'
-          + '<div style="font-size:12px;color:var(--text-muted);margin-top:2px">Live research (website, news, SEC, Intricately) + AI generation per account</div></div>'
-          + '</div>'
-          // Progress bar
-          + '<div style="margin-bottom:16px">'
-          + '<div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-muted);margin-bottom:6px"><span>' + cp.generated + ' of ' + cp.total_accounts + ' emails</span><span>' + pctDone + '%</span></div>'
-          + '<div class="progress-bar" style="height:8px"><div class="progress-fill" id="batch-progress-fill" style="width:' + pctDone + '%;transition:width 1s ease"></div></div>'
-          + '</div>'
-          // Per-account status
-          + '<div id="batch-account-status" style="font-size:12px">'
-          + '<div style="display:flex;align-items:center;gap:8px;padding:6px 0;color:var(--text-muted)"><div class="spinner" style="width:12px;height:12px;border-width:1.5px;flex-shrink:0"></div><span>Fetching account data and running live probes...</span></div>'
-          + '</div>'
-          + '</div>';
-        prog.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    function startProgressAnim(pctDone) {
+      return setInterval(function() {
+        var fill = document.getElementById('batch-progress-fill');
+        if (fill) {
+          var current = parseFloat(fill.style.width);
+          var target = Math.min(current + 0.3, pctDone + (100 - pctDone) * 0.8);
+          fill.style.width = target + '%';
+        }
+      }, 500);
+    }
 
-        // Animate the progress bar while waiting
-        var animInterval = setInterval(function() {
-          var fill = document.getElementById('batch-progress-fill');
-          if (fill) {
-            var current = parseFloat(fill.style.width);
-            var target = Math.min(current + 0.3, pctDone + (100 - pctDone) * 0.8);
-            fill.style.width = target + '%';
-          }
-        }, 500);
+    function handleGenResult(result, animInterval) {
+      clearInterval(animInterval);
+      var statusEl = document.getElementById('batch-account-status');
+      if (statusEl && result.batch) {
+        var statusHtml = '';
+        for (var i = 0; i < result.batch.length; i++) {
+          var b = result.batch[i];
+          var icon = b.status === 'generated' ? '<span style="color:var(--green)">\u2713</span>' : '<span style="color:var(--red)">\u2717</span>';
+          statusHtml += '<div style="display:flex;align-items:center;gap:8px;padding:4px 0">' + icon + ' <span style="color:var(--text-primary);font-weight:600">' + b.accountName + '</span>';
+          if (b.subject) statusHtml += ' <span style="color:var(--text-muted)">&mdash; ' + b.subject.slice(0, 50) + '</span>';
+          if (b.error) statusHtml += ' <span style="color:var(--red)">' + b.error + '</span>';
+          statusHtml += '</div>';
+        }
+        statusEl.innerHTML = statusHtml;
+      }
+      var newPct = result.total > 0 ? Math.round((result.generated / result.total) * 100) : 100;
+      var fill = document.getElementById('batch-progress-fill');
+      if (fill) fill.style.width = newPct + '%';
+      setTimeout(function() {
+        renderCampaignDetail(document.getElementById('main'), id);
+      }, 2000);
+    }
 
-        api.post('/campaigns/' + id + '/generate', {}).then(function(result) {
-          clearInterval(animInterval);
-          var statusEl = document.getElementById('batch-account-status');
-          if (statusEl && result.batch) {
-            var statusHtml = '';
-            for (var i = 0; i < result.batch.length; i++) {
-              var b = result.batch[i];
-              var icon = b.status === 'generated' ? '<span style="color:var(--green)">\u2713</span>' : '<span style="color:var(--red)">\u2717</span>';
-              statusHtml += '<div style="display:flex;align-items:center;gap:8px;padding:4px 0">' + icon + ' <span style="color:var(--text-primary);font-weight:600">' + b.accountName + '</span>';
-              if (b.subject) statusHtml += ' <span style="color:var(--text-muted)">&mdash; ' + b.subject.slice(0, 50) + '</span>';
-              if (b.error) statusHtml += ' <span style="color:var(--red)">' + b.error + '</span>';
-              statusHtml += '</div>';
-            }
-            statusEl.innerHTML = statusHtml;
-          }
+    function handleGenError(err, prog, animInterval) {
+      clearInterval(animInterval);
+      prog.innerHTML = '<div class="d-card" style="border-color:rgba(248,113,113,0.3);text-align:center;padding:24px">'
+        + '<div style="color:var(--red);font-size:15px;font-weight:700;margin-bottom:8px">Generation failed</div>'
+        + '<div style="color:var(--text-muted);font-size:13px;margin-bottom:16px">' + (err.message || err) + '</div>'
+        + '<button class="btn btn-primary" onclick="renderCampaignDetail(document.getElementById(\'main\'),\'' + id + '\')">' + IC.sparkles + ' Retry</button>'
+        + '</div>';
+    }
 
-          // Update progress bar to actual
-          var newPct = result.total > 0 ? Math.round((result.generated / result.total) * 100) : 100;
-          var fill = document.getElementById('batch-progress-fill');
-          if (fill) fill.style.width = newPct + '%';
+    // --- Generate batch handler (2 at a time) ---
+    function runGenerate(generateAll) {
+      var genAllBtn = document.getElementById('gen-all-btn');
+      var genBatchBtn = document.getElementById('gen-batch-btn');
+      if (genAllBtn) { genAllBtn.disabled = true; genAllBtn.style.opacity = '0.5'; }
+      if (genBatchBtn) { genBatchBtn.disabled = true; genBatchBtn.style.opacity = '0.5'; }
 
-          // Wait a moment to show results, then refresh
-          setTimeout(function() {
-            renderCampaignDetail(document.getElementById('main'), id);
-          }, 2000);
-        }).catch(function(err) {
-          clearInterval(animInterval);
-          prog.innerHTML = '<div class="d-card" style="border-color:rgba(248,113,113,0.3);text-align:center;padding:24px">'
-            + '<div style="color:var(--red);font-size:15px;font-weight:700;margin-bottom:8px">Generation failed</div>'
-            + '<div style="color:var(--text-muted);font-size:13px;margin-bottom:16px">' + (err.message || err) + '</div>'
-            + '<button class="btn btn-primary" onclick="renderCampaignDetail(document.getElementById(\'main\'),\'' + id + '\')">' + IC.sparkles + ' Retry</button>'
-            + '</div>';
-        });
+      var prog = document.getElementById('gen-progress');
+      var pctDone = cp.total_accounts > 0 ? Math.round((cp.generated / cp.total_accounts) * 100) : 0;
+      var remaining = pendingAccounts.length;
+      var batchSize = generateAll ? remaining : Math.min(2, remaining);
+      var label = 'Generating ' + batchSize + ' hyper-personalized email' + (batchSize > 1 ? 's' : '') + '...';
+
+      showGenProgress(prog, label, batchSize, pctDone);
+      var animInterval = startProgressAnim(pctDone);
+
+      api.post('/campaigns/' + id + '/generate', { all: generateAll }).then(function(result) {
+        handleGenResult(result, animInterval);
+      }).catch(function(err) {
+        handleGenError(err, prog, animInterval);
       });
+    }
+
+    var genAllBtn = document.getElementById('gen-all-btn');
+    if (genAllBtn) {
+      genAllBtn.addEventListener('click', function() { runGenerate(true); });
+    }
+    var genBatchBtn = document.getElementById('gen-batch-btn');
+    if (genBatchBtn) {
+      genBatchBtn.addEventListener('click', function() { runGenerate(false); });
+    }
+
+    // --- Single account retry (for pending accounts) ---
+    var retryBtns = document.querySelectorAll('.retry-single-btn');
+    for (var rb = 0; rb < retryBtns.length; rb++) {
+      (function(btn) {
+        btn.addEventListener('click', function() {
+          var accountId = btn.getAttribute('data-account-id');
+          var accountName = btn.getAttribute('data-account-name');
+          btn.disabled = true;
+          btn.innerHTML = '<div class="spinner" style="width:12px;height:12px;border-width:1.5px;display:inline-block;vertical-align:middle"></div> Generating...';
+          btn.closest('.d-card').style.borderColor = 'var(--border-accent)';
+
+          api.post('/campaigns/' + id + '/regenerate/' + accountId, {}).then(function(result) {
+            if (result.status === 'generated') {
+              btn.innerHTML = '<span style="color:var(--green)">\u2713</span> Generated';
+              btn.closest('.d-card').style.borderColor = 'rgba(52,211,153,0.3)';
+              setTimeout(function() {
+                renderCampaignDetail(document.getElementById('main'), id);
+              }, 1500);
+            } else {
+              btn.innerHTML = '<span style="color:var(--red)">\u2717</span> Failed - Click to Retry';
+              btn.disabled = false;
+              btn.closest('.d-card').style.borderColor = 'rgba(248,113,113,0.3)';
+            }
+          }).catch(function(err) {
+            btn.innerHTML = '<span style="color:var(--red)">\u2717</span> Failed - Click to Retry';
+            btn.disabled = false;
+            btn.closest('.d-card').style.borderColor = 'rgba(248,113,113,0.3)';
+          });
+        });
+      })(retryBtns[rb]);
+    }
+
+    // --- Regenerate button on already-generated emails ---
+    var regenBtns = document.querySelectorAll('.regen-btn');
+    for (var rg = 0; rg < regenBtns.length; rg++) {
+      (function(btn) {
+        btn.addEventListener('click', function() {
+          var accountId = btn.getAttribute('data-email-account-id');
+          var accountName = btn.getAttribute('data-email-account-name');
+          if (!confirm('Regenerate email for ' + accountName + '? This will replace the current email.')) return;
+          btn.disabled = true;
+          btn.innerHTML = '<div class="spinner" style="width:12px;height:12px;border-width:1.5px;display:inline-block;vertical-align:middle"></div> Regenerating...';
+
+          api.post('/campaigns/' + id + '/regenerate/' + accountId, {}).then(function(result) {
+            if (result.status === 'generated') {
+              btn.innerHTML = '<span style="color:var(--green)">\u2713</span> Regenerated';
+              setTimeout(function() {
+                renderCampaignDetail(document.getElementById('main'), id);
+              }, 1500);
+            } else {
+              btn.innerHTML = IC.sparkles + ' Regenerate (failed, try again)';
+              btn.disabled = false;
+            }
+          }).catch(function(err) {
+            btn.innerHTML = IC.sparkles + ' Regenerate (failed, try again)';
+            btn.disabled = false;
+          });
+        });
+      })(regenBtns[rg]);
+    }
+
+    // --- Campaign email approval handlers ---
+    function updateCampEmailApproval(eid, newStatus) {
+      var card = document.querySelector('.camp-email-card[data-email-id="' + eid + '"]');
+      if (card) {
+        card.setAttribute('data-approval', newStatus);
+        var badge = card.querySelector('.camp-email-badge[data-eid="' + eid + '"]');
+        if (badge) { badge.className = 'approval-badge approval-' + newStatus + ' camp-email-badge'; badge.setAttribute('data-eid', eid); badge.textContent = getApprovalLabel(newStatus); }
+      }
+    }
+
+    // Per-email approve buttons
+    var campApproveBtns = document.querySelectorAll('.camp-approve-btn');
+    for (var ca = 0; ca < campApproveBtns.length; ca++) {
+      (function(btn) {
+        btn.addEventListener('click', function() {
+          var eid = btn.getAttribute('data-eid');
+          btn.disabled = true;
+          btn.textContent = '...';
+          fetch('/api/campaign-emails/' + eid + '/approve', { method: 'POST', headers: { 'Content-Type': 'application/json' } })
+            .then(function(r) { return r.json(); })
+            .then(function(d) {
+              if (d.success) {
+                toast('Email approved', 'success');
+                // Refresh to update all counters
+                renderCampaignDetail(document.getElementById('main'), id);
+              } else {
+                toast('Approve failed: ' + (d.error || 'Unknown error'), 'error');
+                btn.disabled = false;
+                btn.textContent = 'Approve';
+              }
+            }).catch(function(e) { toast('Error: ' + e.message, 'error'); btn.disabled = false; btn.textContent = 'Approve'; });
+        });
+      })(campApproveBtns[ca]);
+    }
+
+    // Per-email reject buttons
+    var campRejectBtns = document.querySelectorAll('.camp-reject-btn');
+    for (var cr = 0; cr < campRejectBtns.length; cr++) {
+      (function(btn) {
+        btn.addEventListener('click', function() {
+          var eid = btn.getAttribute('data-eid');
+          btn.disabled = true;
+          btn.textContent = '...';
+          fetch('/api/campaign-emails/' + eid + '/reject', { method: 'POST', headers: { 'Content-Type': 'application/json' } })
+            .then(function(r) { return r.json(); })
+            .then(function(d) {
+              if (d.success) {
+                toast('Email rejected', 'success');
+                renderCampaignDetail(document.getElementById('main'), id);
+              } else {
+                toast('Reject failed: ' + (d.error || 'Unknown error'), 'error');
+                btn.disabled = false;
+                btn.textContent = 'Reject';
+              }
+            }).catch(function(e) { toast('Error: ' + e.message, 'error'); btn.disabled = false; btn.textContent = 'Reject'; });
+        });
+      })(campRejectBtns[cr]);
+    }
+
+    // Bulk approve all pending
+    var bulkApproveBtn = document.getElementById('bulk-approve-btn');
+    if (bulkApproveBtn) {
+      bulkApproveBtn.addEventListener('click', function() {
+        bulkApproveBtn.disabled = true;
+        bulkApproveBtn.textContent = 'Approving...';
+        fetch('/api/campaigns/' + id + '/approve-all', { method: 'POST', headers: { 'Content-Type': 'application/json' } })
+          .then(function(r) { return r.json(); })
+          .then(function(d) {
+            if (d.success) {
+              toast('All pending emails approved (' + (d.updated || 0) + ')', 'success');
+              renderCampaignDetail(document.getElementById('main'), id);
+            } else {
+              toast('Bulk approve failed', 'error');
+              bulkApproveBtn.disabled = false;
+              bulkApproveBtn.textContent = 'Approve All Pending';
+            }
+          }).catch(function(e) { toast('Error: ' + e.message, 'error'); bulkApproveBtn.disabled = false; bulkApproveBtn.textContent = 'Approve All Pending'; });
+      });
+    }
+
+    // Bulk reject all pending
+    var bulkRejectBtn = document.getElementById('bulk-reject-btn');
+    if (bulkRejectBtn) {
+      bulkRejectBtn.addEventListener('click', function() {
+        if (!confirm('Reject all pending emails? They will not be sent.')) return;
+        bulkRejectBtn.disabled = true;
+        bulkRejectBtn.textContent = 'Rejecting...';
+        fetch('/api/campaigns/' + id + '/reject-all', { method: 'POST', headers: { 'Content-Type': 'application/json' } })
+          .then(function(r) { return r.json(); })
+          .then(function(d) {
+            if (d.success) {
+              toast('All pending emails rejected (' + (d.updated || 0) + ')', 'success');
+              renderCampaignDetail(document.getElementById('main'), id);
+            } else {
+              toast('Bulk reject failed', 'error');
+              bulkRejectBtn.disabled = false;
+              bulkRejectBtn.textContent = 'Reject All Pending';
+            }
+          }).catch(function(e) { toast('Error: ' + e.message, 'error'); bulkRejectBtn.disabled = false; bulkRejectBtn.textContent = 'Reject All Pending'; });
+      });
+    }
+
+    // Filter tabs for campaign emails
+    var filterBtns = document.querySelectorAll('.camp-filter-btn');
+    for (var fb = 0; fb < filterBtns.length; fb++) {
+      (function(btn) {
+        btn.addEventListener('click', function() {
+          for (var x = 0; x < filterBtns.length; x++) filterBtns[x].classList.remove('selected');
+          btn.classList.add('selected');
+          var filter = btn.getAttribute('data-filter');
+          var cards = document.querySelectorAll('.camp-email-card');
+          for (var ci = 0; ci < cards.length; ci++) {
+            if (filter === 'all') {
+              cards[ci].style.display = '';
+            } else {
+              var cardApproval = cards[ci].getAttribute('data-approval') || 'pending_approval';
+              cards[ci].style.display = (cardApproval === filter) ? '' : 'none';
+            }
+          }
+        });
+      })(filterBtns[fb]);
     }
 
     // Copy all

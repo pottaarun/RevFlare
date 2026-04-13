@@ -3025,6 +3025,85 @@ app.post('/api/alerts/:id/read', async (c) => {
   return c.json({ success: true });
 });
 
+// ── Alert → Email Generation (with product selection) ──────────────
+app.post('/api/alerts/:id/email', async (c) => {
+  const email = c.get('userEmail');
+  const alert = await c.env.DB.prepare('SELECT * FROM alerts WHERE id = ? AND user_email = ?').bind(c.req.param('id'), email).first() as any;
+  if (!alert) return c.json({ error: 'Alert not found' }, 404);
+
+  const { products, persona, customContext } = await c.req.json<{
+    products: string[];
+    persona?: string;
+    customContext?: string;
+  }>();
+
+  if (!products || !products.length) return c.json({ error: 'Select at least one Cloudflare product' }, 400);
+
+  // Look up the account
+  let account: any = {};
+  if (alert.account_id) {
+    account = await c.env.DB.prepare('SELECT * FROM accounts WHERE id = ? AND user_email = ?').bind(alert.account_id, email).first() || {};
+  }
+
+  const accountCtx = account.account_name ? buildAccountContext(account) : 'No specific account linked.';
+  const personaConfig = PERSONA_CONFIGS[persona || 'bdr'] || PERSONA_CONFIGS.bdr;
+
+  // Build product details from the catalog
+  const productDetails = products.map((p: string) => {
+    for (const cat of Object.values(CF_PRODUCT_MAP)) {
+      for (const prod of (cat as any).products) {
+        if (typeof prod === 'string' && prod.toLowerCase().includes(p.toLowerCase())) {
+          return `${prod}: ${(cat as any).pitch}`;
+        }
+      }
+    }
+    return p;
+  }).join('\n');
+
+  const system = `You are a ${personaConfig.title} at Cloudflare writing a response email triggered by a real infrastructure or security event. Write a personalized outreach email that:
+1. References the specific event/alert naturally (don't sound alarmist)
+2. Explains how the selected Cloudflare products directly address/mitigate the issue
+3. Provides a clear, specific value proposition for this account
+4. Includes a soft CTA (meeting, demo, or assessment)
+
+Tone: ${personaConfig.style || 'Professional and consultative'}. Keep it concise (150-250 words). Include a subject line.`;
+
+  const prompt = `ALERT:
+- Type: ${alert.alert_type}
+- Title: ${alert.title}
+- Detail: ${alert.detail || 'N/A'}
+- Severity: ${alert.severity}
+
+ACCOUNT CONTEXT:
+${accountCtx}
+
+CLOUDFLARE PRODUCTS TO POSITION:
+${productDetails}
+
+${customContext ? 'ADDITIONAL CONTEXT:\n' + customContext : ''}
+
+Generate the outreach email now.`;
+
+  try {
+    const content = await runAI(c.env.AI, EMAIL_MODEL, system, prompt);
+    const result = typeof content === 'string' ? content : JSON.stringify(content);
+
+    // Save as a persona message if account exists
+    if (account.id) {
+      await c.env.DB.prepare(
+        'INSERT INTO persona_messages (account_id, persona, message_type, subject, content, user_email) VALUES (?,?,?,?,?,?)'
+      ).bind(account.id, persona || 'bdr', 'alert_response', alert.title, result, email).run();
+    }
+
+    // Mark alert as read
+    await c.env.DB.prepare('UPDATE alerts SET read = 1 WHERE id = ?').bind(alert.id).run();
+
+    return c.json({ content: result, alert, account_name: account.account_name || null });
+  } catch (e: any) {
+    return c.json({ error: 'Email generation failed: ' + e.message }, 500);
+  }
+});
+
 // ── Win/Loss Analysis ──────────────────────────────────────────────
 app.post('/api/win-loss/:opportunityId', async (c) => {
   const opp = await c.env.DB.prepare('SELECT * FROM opportunities WHERE id = ? AND user_email = ?').bind(c.req.param('opportunityId'), c.get('userEmail')).first() as any;

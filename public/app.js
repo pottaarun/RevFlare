@@ -2047,10 +2047,20 @@ function renderLeadScores(c) {
 function renderAlerts(c) {
   c.innerHTML = '<div class="loading-state"><div class="spinner"></div>Loading alerts...</div>';
 
+  // Product categories for the picker
+  var PRODUCT_GROUPS = [
+    { name: 'CDN & Performance', products: ['Cloudflare CDN', 'Argo Smart Routing', 'Cache Reserve', 'Speed Brain', 'Waiting Room'] },
+    { name: 'Security', products: ['WAF', 'DDoS Protection', 'Bot Management', 'API Shield', 'Page Shield', 'Turnstile'] },
+    { name: 'Zero Trust / SASE', products: ['Cloudflare Access', 'Gateway', 'WARP', 'Browser Isolation', 'CASB', 'DLP', 'Email Security'] },
+    { name: 'DNS', products: ['Cloudflare DNS', 'DNS Firewall', 'DNSSEC', 'Secondary DNS'] },
+    { name: 'Edge Compute', products: ['Workers', 'Workers KV', 'R2', 'D1', 'Durable Objects', 'Workers AI', 'Vectorize'] },
+    { name: 'Network', products: ['Magic Transit', 'Magic WAN', 'Spectrum', 'Network Interconnect'] },
+  ];
+
   api.get('/alerts').then(function(alerts) {
     var h = '<div class="fade-in">';
     h += '<div class="page-header"><div class="page-header-row"><div><h1 class="page-title">Alerts & Notifications</h1>';
-    h += '<p class="page-subtitle">Infrastructure changes, threat matches, and other signals detected across your accounts.</p></div>';
+    h += '<p class="page-subtitle">Infrastructure changes, threat matches, and other signals. Click any alert to generate a targeted outreach email.</p></div>';
     var unread = alerts.filter(function(a){return !a.read}).length;
     if (unread) h += '<span class="pill pill-churned" style="font-size:12px;padding:6px 14px">' + unread + ' unread</span>';
     h += '</div></div>';
@@ -2064,40 +2074,161 @@ function renderAlerts(c) {
     for (var i = 0; i < alerts.length; i++) {
       var a = alerts[i];
       var sevColor = a.severity === 'critical' ? '#f87171' : a.severity === 'high' ? '#fb923c' : '#fbbf24';
-      var readStyle = a.read ? 'opacity:0.5;' : '';
+      var readStyle = a.read ? 'opacity:0.6;' : '';
       var typeIcon = a.alert_type === 'threat_match' ? IC.shield : a.alert_type === 'cdn_change' ? IC.zap : a.alert_type === 'dns_change' ? IC.globe : IC.alert;
+      var typeLabel = (a.alert_type || '').replace(/_/g, ' ');
 
-      h += '<div class="d-card" style="margin-bottom:10px;border-color:' + sevColor + '20;' + readStyle + '">';
-      h += '<div style="display:flex;align-items:flex-start;gap:12px">';
+      h += '<div class="d-card alert-card" data-alert-id="' + a.id + '" style="margin-bottom:12px;border-color:' + sevColor + '20;' + readStyle + 'cursor:pointer;transition:all 0.2s">';
+
+      // Header row
+      h += '<div class="alert-header" style="display:flex;align-items:flex-start;gap:12px">';
       h += '<div style="color:' + sevColor + ';flex-shrink:0;margin-top:2px">' + typeIcon + '</div>';
-      h += '<div style="flex:1">';
-      h += '<div style="display:flex;align-items:center;gap:8px">';
+      h += '<div style="flex:1;min-width:0">';
+      h += '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">';
       if (!a.read) h += '<span style="width:8px;height:8px;border-radius:50%;background:' + sevColor + ';flex-shrink:0"></span>';
-      h += '<span style="font-size:13px;font-weight:700;color:var(--text-primary)">' + (a.title || '') + '</span>';
-      h += '<span class="pill" style="font-size:9px;padding:1px 6px;background:' + sevColor + '15;color:' + sevColor + '">' + (a.severity || 'medium') + '</span>';
+      h += '<span style="font-size:14px;font-weight:700;color:var(--text-primary)">' + esc(a.title || '') + '</span>';
+      h += '<span class="pill" style="font-size:9px;padding:1px 6px;background:' + sevColor + '15;color:' + sevColor + '">' + esc(a.severity || 'medium') + '</span>';
+      h += '<span class="pill" style="font-size:9px;padding:1px 6px;background:rgba(255,255,255,0.04);color:var(--text-muted)">' + esc(typeLabel) + '</span>';
       h += '</div>';
-      if (a.detail) h += '<div style="font-size:12px;color:var(--text-muted);margin-top:4px">' + a.detail + '</div>';
-      h += '<div style="font-size:11px;color:var(--text-muted);margin-top:6px">' + (a.alert_type || '').replace(/_/g, ' ') + ' &middot; ' + timeAgo(a.created_at) + '</div>';
+      if (a.detail) h += '<div style="font-size:12px;color:var(--text-secondary);margin-top:5px">' + esc(a.detail) + '</div>';
+      h += '<div style="font-size:11px;color:var(--text-muted);margin-top:6px;display:flex;align-items:center;gap:12px">';
+      h += '<span>' + timeAgo(a.created_at) + '</span>';
+      if (a.account_id) h += '<a href="#/account/' + a.account_id + '" style="color:var(--accent-bright);text-decoration:none;font-weight:600" onclick="event.stopPropagation()">View Account</a>';
       h += '</div>';
-      if (!a.read) h += '<button class="btn btn-ghost btn-sm mark-read-btn" data-id="' + a.id + '" style="font-size:10px;flex-shrink:0">Mark read</button>';
+      h += '</div>';
+
+      // Action buttons (always visible)
+      h += '<div style="display:flex;gap:6px;flex-shrink:0;align-items:center">';
+      h += '<button class="btn btn-accent-ghost btn-sm alert-email-toggle" data-id="' + a.id + '" style="font-size:11px">' + IC.mail + ' Generate Email</button>';
+      if (!a.read) h += '<button class="btn btn-ghost btn-sm mark-read-btn" data-id="' + a.id + '" style="font-size:10px">Mark read</button>';
+      h += '</div>';
+      h += '</div>';
+
+      // Expandable email generation panel (hidden by default)
+      h += '<div class="alert-expand" id="alert-expand-' + a.id + '" style="display:none;margin-top:16px;padding-top:16px;border-top:1px solid var(--border-glass)">';
+
+      // Product picker
+      h += '<div style="margin-bottom:14px"><div style="font-size:12px;font-weight:700;color:var(--text-primary);margin-bottom:10px">Select Cloudflare products to position:</div>';
+      h += '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px">';
+      for (var g = 0; g < PRODUCT_GROUPS.length; g++) {
+        var grp = PRODUCT_GROUPS[g];
+        h += '<div style="background:var(--glass);border:1px solid var(--border-glass);border-radius:var(--radius-md);padding:10px">';
+        h += '<div style="font-size:10px;font-weight:700;color:var(--text-muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px">' + esc(grp.name) + '</div>';
+        for (var p = 0; p < grp.products.length; p++) {
+          var pid = 'prod-' + a.id + '-' + g + '-' + p;
+          h += '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;padding:2px 0;font-size:11px;color:var(--text-secondary)">';
+          h += '<input type="checkbox" class="alert-prod-' + a.id + '" value="' + esc(grp.products[p]) + '" style="accent-color:var(--accent-bright)" />';
+          h += esc(grp.products[p]) + '</label>';
+        }
+        h += '</div>';
+      }
       h += '</div></div>';
+
+      // Persona + context
+      h += '<div style="display:flex;gap:12px;margin-bottom:14px">';
+      h += '<div style="flex:1"><label style="font-size:11px;font-weight:600;color:var(--text-muted);display:block;margin-bottom:4px">Persona</label>';
+      h += '<select class="filter-select alert-persona-' + a.id + '" style="width:100%"><option value="bdr">BDR</option><option value="ae">AE</option><option value="csm">CSM</option><option value="se">SE</option><option value="vp_sales">VP Sales</option></select></div>';
+      h += '<div style="flex:3"><label style="font-size:11px;font-weight:600;color:var(--text-muted);display:block;margin-bottom:4px">Additional context (optional)</label>';
+      h += '<input type="text" class="search-input alert-ctx-' + a.id + '" placeholder="e.g. They mentioned evaluating Zero Trust at our last meeting..." style="padding-left:14px;width:100%" /></div>';
+      h += '</div>';
+
+      // Generate button
+      h += '<button class="btn btn-primary alert-gen-btn" data-id="' + a.id + '">' + IC.sparkles + ' Generate Outreach Email</button>';
+      h += '<div class="alert-email-output" id="alert-email-' + a.id + '" style="margin-top:16px"></div>';
+      h += '</div>';
+
+      h += '</div>';
     }
     h += '</div>';
     c.innerHTML = h;
+
+    // Toggle expand panels
+    var toggleBtns = document.querySelectorAll('.alert-email-toggle');
+    for (var i = 0; i < toggleBtns.length; i++) {
+      (function(btn) {
+        btn.addEventListener('click', function(e) {
+          e.stopPropagation();
+          var id = btn.getAttribute('data-id');
+          var panel = document.getElementById('alert-expand-' + id);
+          if (panel) {
+            var isOpen = panel.style.display !== 'none';
+            panel.style.display = isOpen ? 'none' : 'block';
+            btn.innerHTML = isOpen ? IC.mail + ' Generate Email' : IC.mail + ' Close';
+            if (!isOpen) panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+          }
+        });
+      })(toggleBtns[i]);
+    }
 
     // Mark read handlers
     var readBtns = document.querySelectorAll('.mark-read-btn');
     for (var i = 0; i < readBtns.length; i++) {
       (function(btn) {
-        btn.addEventListener('click', function() {
+        btn.addEventListener('click', function(e) {
+          e.stopPropagation();
           api.post('/alerts/' + btn.getAttribute('data-id') + '/read', {}).then(function() {
-            btn.closest('.d-card').style.opacity = '0.5';
+            btn.closest('.d-card').style.opacity = '0.6';
             btn.remove();
             var badge = document.getElementById('alert-badge');
             if (badge) { var n = parseInt(badge.textContent || '0') - 1; if (n <= 0) badge.style.display = 'none'; else badge.textContent = n; }
           });
         });
       })(readBtns[i]);
+    }
+
+    // Generate email handlers
+    var genBtns = document.querySelectorAll('.alert-gen-btn');
+    for (var i = 0; i < genBtns.length; i++) {
+      (function(btn) {
+        btn.addEventListener('click', function(e) {
+          e.stopPropagation();
+          var id = btn.getAttribute('data-id');
+          // Gather selected products
+          var checks = document.querySelectorAll('.alert-prod-' + id + ':checked');
+          var products = [];
+          for (var j = 0; j < checks.length; j++) products.push(checks[j].value);
+          if (!products.length) { toast('Select at least one Cloudflare product', 'error'); return; }
+
+          var persona = document.querySelector('.alert-persona-' + id);
+          var ctx = document.querySelector('.alert-ctx-' + id);
+          var out = document.getElementById('alert-email-' + id);
+
+          btn.disabled = true;
+          btn.innerHTML = '<div class="spinner" style="width:12px;height:12px;border-width:2px;display:inline-block;vertical-align:middle;margin-right:6px"></div> Generating...';
+          out.innerHTML = '<div class="output-card"><div class="ai-loading"><div class="ai-pulse">' + IC.sparkles + '</div><div class="ai-loading-text">Generating targeted outreach email...</div><div class="ai-loading-sub">Using alert context + ' + products.length + ' selected products</div></div></div>';
+
+          api.post('/alerts/' + id + '/email', {
+            products: products,
+            persona: persona ? persona.value : 'bdr',
+            customContext: ctx ? ctx.value : '',
+          }).then(function(r) {
+            if (r.error) { out.innerHTML = '<div style="color:var(--red);padding:12px">' + esc(r.error) + '</div>'; btn.disabled = false; btn.innerHTML = IC.sparkles + ' Generate Outreach Email'; return; }
+
+            var content = r.content || '';
+            var subjectM = content.match(/Subject:?\s*(.+?)(?:\n|$)/i);
+            var subject = subjectM ? subjectM[1].trim() : 'Alert Follow-Up';
+            var emailBody = content.replace(/^Subject:?\s*.+\n*/im, '');
+
+            var eh = '<div class="email-preview slide-up">';
+            eh += '<div class="email-toolbar"><div class="email-dot r"></div><div class="email-dot y"></div><div class="email-dot g"></div>';
+            eh += '<span style="margin-left:auto;font-size:11px;color:var(--text-muted)">Alert Response' + (r.account_name ? ' for ' + esc(r.account_name) : '') + '</span></div>';
+            eh += '<div class="email-subject-bar"><div class="email-subject-label">Subject</div><div class="email-subject">' + esc(subject) + '</div></div>';
+            eh += '<div class="email-body">' + md(emailBody) + '</div>';
+            eh += '<div class="email-actions"><button class="btn btn-primary btn-sm" onclick="copyEl(this,\'email\')">' + IC.copy + ' Copy Email</button></div>';
+            eh += '</div>';
+            out.innerHTML = eh;
+
+            // Mark the card as actioned
+            btn.closest('.d-card').style.opacity = '0.6';
+            btn.disabled = false;
+            btn.innerHTML = IC.sparkles + ' Regenerate Email';
+          }).catch(function(err) {
+            out.innerHTML = '<div style="color:var(--red);padding:12px">' + esc(err.message || err) + '</div>';
+            btn.disabled = false;
+            btn.innerHTML = IC.sparkles + ' Generate Outreach Email';
+          });
+        });
+      })(genBtns[i]);
     }
   }).catch(function(err) {
     c.innerHTML = '<div style="padding:32px;color:var(--red)">' + err.message + '</div>';

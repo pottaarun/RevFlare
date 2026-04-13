@@ -2107,18 +2107,23 @@ function renderAlerts(c) {
       // Expandable email generation panel (hidden by default)
       h += '<div class="alert-expand" id="alert-expand-' + a.id + '" style="display:none;margin-top:16px;padding-top:16px;border-top:1px solid var(--border-glass)">';
 
-      // Product picker
-      h += '<div style="margin-bottom:14px"><div style="font-size:12px;font-weight:700;color:var(--text-primary);margin-bottom:10px">Select Cloudflare products to position:</div>';
-      h += '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px">';
+      // Product picker with AI suggestion status
+      h += '<div style="margin-bottom:14px"><div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">';
+      h += '<span style="font-size:12px;font-weight:700;color:var(--text-primary)">Cloudflare products to position:</span>';
+      h += '<span id="ai-suggest-status-' + a.id + '" style="font-size:10px;color:var(--text-muted)"></span>';
+      h += '</div>';
+      h += '<div id="product-grid-' + a.id + '" style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px">';
       for (var g = 0; g < PRODUCT_GROUPS.length; g++) {
         var grp = PRODUCT_GROUPS[g];
         h += '<div style="background:var(--glass);border:1px solid var(--border-glass);border-radius:var(--radius-md);padding:10px">';
         h += '<div style="font-size:10px;font-weight:700;color:var(--text-muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px">' + esc(grp.name) + '</div>';
         for (var p = 0; p < grp.products.length; p++) {
           var pid = 'prod-' + a.id + '-' + g + '-' + p;
-          h += '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;padding:2px 0;font-size:11px;color:var(--text-secondary)">';
-          h += '<input type="checkbox" class="alert-prod-' + a.id + '" value="' + esc(grp.products[p]) + '" style="accent-color:var(--accent-bright)" />';
-          h += esc(grp.products[p]) + '</label>';
+          h += '<label id="label-' + pid + '" style="display:flex;align-items:center;gap:6px;cursor:pointer;padding:2px 0;font-size:11px;color:var(--text-secondary);border-radius:4px;transition:background 0.2s">';
+          h += '<input type="checkbox" id="' + pid + '" class="alert-prod-' + a.id + '" value="' + esc(grp.products[p]) + '" style="accent-color:var(--accent-bright)" />';
+          h += '<span>' + esc(grp.products[p]) + '</span>';
+          h += '<span class="ai-badge-' + a.id + '" data-prod="' + esc(grp.products[p]) + '" style="display:none;font-size:8px;padding:1px 5px;border-radius:3px;background:var(--accent-bright);color:#000;font-weight:700;letter-spacing:0.3px">AI</span>';
+          h += '</label>';
         }
         h += '</div>';
       }
@@ -2142,7 +2147,8 @@ function renderAlerts(c) {
     h += '</div>';
     c.innerHTML = h;
 
-    // Toggle expand panels
+    // Toggle expand panels + AI product suggestion
+    var suggestedCache = {}; // cache per alert ID so we don't re-fetch
     var toggleBtns = document.querySelectorAll('.alert-email-toggle');
     for (var i = 0; i < toggleBtns.length; i++) {
       (function(btn) {
@@ -2154,7 +2160,44 @@ function renderAlerts(c) {
             var isOpen = panel.style.display !== 'none';
             panel.style.display = isOpen ? 'none' : 'block';
             btn.innerHTML = isOpen ? IC.mail + ' Generate Email' : IC.mail + ' Close';
-            if (!isOpen) panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            if (!isOpen) {
+              panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+              // Auto-suggest products via AI (only on first open)
+              if (!suggestedCache[id]) {
+                var statusEl = document.getElementById('ai-suggest-status-' + id);
+                if (statusEl) statusEl.innerHTML = '<div class="spinner" style="width:10px;height:10px;border-width:2px;display:inline-block;vertical-align:middle;margin-right:4px"></div> AI analyzing alert...';
+                api.post('/alerts/' + id + '/suggest-products', {}).then(function(r) {
+                  var products = r.products || [];
+                  suggestedCache[id] = products;
+                  // Pre-check suggested products and show AI badges
+                  var checkboxes = document.querySelectorAll('.alert-prod-' + id);
+                  for (var j = 0; j < checkboxes.length; j++) {
+                    var cb = checkboxes[j];
+                    var isMatch = products.some(function(p) { return p.toLowerCase() === cb.value.toLowerCase(); });
+                    if (isMatch) {
+                      cb.checked = true;
+                      cb.closest('label').style.background = 'rgba(99,179,237,0.08)';
+                    }
+                  }
+                  // Show AI badges
+                  var badges = document.querySelectorAll('.ai-badge-' + id);
+                  for (var j = 0; j < badges.length; j++) {
+                    var badge = badges[j];
+                    var isMatch = products.some(function(p) { return p.toLowerCase() === badge.getAttribute('data-prod').toLowerCase(); });
+                    if (isMatch) badge.style.display = 'inline';
+                  }
+                  if (statusEl) {
+                    if (products.length) {
+                      statusEl.innerHTML = IC.sparkles + ' <span style="color:var(--accent-bright)">' + products.length + ' products suggested</span> — adjust as needed';
+                    } else {
+                      statusEl.innerHTML = '<span style="color:var(--text-muted)">No suggestions — pick manually</span>';
+                    }
+                  }
+                }).catch(function() {
+                  if (statusEl) statusEl.innerHTML = '<span style="color:var(--text-muted)">Pick products manually</span>';
+                });
+              }
+            }
           }
         });
       })(toggleBtns[i]);
@@ -3072,15 +3115,58 @@ function renderAnalytics(c) {
       h += '</div></div>';
     }
 
-    // User activity
+    // User activity with per-user tab breakdown
     var users = data.byUser || [];
+    var userTabData = data.byUserTab || [];
+    // Group tab data by user email
+    var tabsByUser = {};
+    for (var i = 0; i < userTabData.length; i++) {
+      var ut = userTabData[i];
+      if (!tabsByUser[ut.user_email]) tabsByUser[ut.user_email] = [];
+      tabsByUser[ut.user_email].push({ tab: ut.tab, views: ut.views });
+    }
     if (users.length) {
       h += '<div class="d-card" style="margin-top:20px"><div class="d-card-title">' + IC.target + ' User Activity</div>';
-      h += '<table style="width:100%"><thead><tr><th>User</th><th>Views</th></tr></thead><tbody>';
+      h += '<p style="font-size:11px;color:var(--text-muted);margin:-8px 0 12px 0">Click a user to see their most-used tabs</p>';
+      h += '<table style="width:100%"><thead><tr><th>User</th><th>Total Views</th><th>Top Tabs</th></tr></thead><tbody>';
       for (var i = 0; i < users.length; i++) {
         var u = users[i];
-        h += '<tr><td style="font-weight:600;color:var(--text-primary)">' + esc(u.user_email) + '</td>';
-        h += '<td style="font-weight:700;color:var(--green)">' + u.views + '</td></tr>';
+        var uTabs = tabsByUser[u.user_email] || [];
+        // Show top 3 tabs inline as pills
+        var topPills = '';
+        for (var t = 0; t < Math.min(3, uTabs.length); t++) {
+          var tabColors = {overview:'var(--green)',research:'var(--blue)',threats:'var(--red)',competitive:'var(--amber)',messaging:'var(--accent-bright)',advanced:'var(--purple)',history:'var(--text-muted)'};
+          var tc = tabColors[uTabs[t].tab] || 'var(--text-muted)';
+          topPills += '<span class="pill" style="font-size:9px;padding:2px 8px;background:' + tc + '15;color:' + tc + ';margin-right:4px">' + esc(uTabs[t].tab) + ' <span style="opacity:0.7">' + uTabs[t].views + '</span></span>';
+        }
+        if (!topPills) topPills = '<span style="font-size:11px;color:var(--text-muted)">--</span>';
+        h += '<tr class="user-row" data-user-email="' + esc(u.user_email) + '" style="cursor:pointer;transition:background 0.15s" onmouseover="this.style.background=\'rgba(255,255,255,0.03)\'" onmouseout="this.style.background=\'transparent\'">';
+        h += '<td style="font-weight:600;color:var(--text-primary)">' + esc(u.user_email) + ' <span style="font-size:10px;color:var(--text-muted)">&#9662;</span></td>';
+        h += '<td style="font-weight:700;color:var(--green)">' + u.views + '</td>';
+        h += '<td>' + topPills + '</td></tr>';
+
+        // Expandable tab breakdown row (hidden by default)
+        h += '<tr class="user-tab-detail" id="user-tabs-' + i + '" style="display:none"><td colspan="3" style="padding:0 0 12px 24px">';
+        if (uTabs.length) {
+          var maxUTab = uTabs[0].views || 1;
+          h += '<div style="background:var(--glass);border:1px solid var(--border-glass);border-radius:var(--radius-md);padding:12px;margin-top:4px">';
+          h += '<div style="font-size:10px;font-weight:700;color:var(--text-muted);margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px">Tab Usage for ' + esc((u.user_email || '').split('@')[0]) + '</div>';
+          for (var t = 0; t < uTabs.length; t++) {
+            var tab = uTabs[t];
+            var tabColors = {overview:'var(--green)',research:'var(--blue)',threats:'var(--red)',competitive:'var(--amber)',messaging:'var(--accent-bright)',advanced:'var(--purple)',history:'var(--text-muted)'};
+            var tc = tabColors[tab.tab] || 'var(--text-muted)';
+            var barW = ((tab.views / maxUTab) * 100).toFixed(0);
+            h += '<div style="display:flex;align-items:center;gap:10px;padding:4px 0">';
+            h += '<span style="width:90px;font-size:12px;font-weight:600;color:' + tc + '">' + esc(tab.tab) + '</span>';
+            h += '<div style="flex:1;height:8px;border-radius:4px;background:rgba(255,255,255,0.04);overflow:hidden"><div style="height:100%;width:' + barW + '%;background:' + tc + ';border-radius:4px;transition:width 0.3s"></div></div>';
+            h += '<span style="font-size:12px;font-weight:700;color:' + tc + ';min-width:32px;text-align:right">' + tab.views + '</span>';
+            h += '</div>';
+          }
+          h += '</div>';
+        } else {
+          h += '<div style="font-size:12px;color:var(--text-muted);padding:8px 0">No tab views recorded for this user</div>';
+        }
+        h += '</td></tr>';
       }
       h += '</tbody></table></div>';
     }
@@ -3102,6 +3188,22 @@ function renderAnalytics(c) {
 
     h += '</div>';
     c.innerHTML = h;
+
+    // Bind click handlers for expandable user tab rows
+    var userRows = document.querySelectorAll('.user-row');
+    for (var i = 0; i < userRows.length; i++) {
+      (function(row, idx) {
+        row.addEventListener('click', function() {
+          var detail = document.getElementById('user-tabs-' + idx);
+          if (detail) {
+            var isOpen = detail.style.display !== 'none';
+            detail.style.display = isOpen ? 'none' : 'table-row';
+            var arrow = row.querySelector('span[style*="color:var(--text-muted)"]');
+            if (arrow && arrow.innerHTML.match(/966[2d]/)) arrow.innerHTML = isOpen ? '&#9662;' : '&#9652;';
+          }
+        });
+      })(userRows[i], i);
+    }
   }).catch(function(err) {
     c.innerHTML = '<div style="padding:32px;color:var(--red)">' + err.message + '</div>';
   });

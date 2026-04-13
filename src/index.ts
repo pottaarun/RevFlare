@@ -101,12 +101,13 @@ app.get('/api/analytics', async (c) => {
   const days = Math.min(parseInt(c.req.query('days') || '30') || 30, 90);
   const since = new Date(Date.now() - days * 86400000).toISOString();
 
-  const [byPage, byTab, byUser, byDay, recent] = await Promise.all([
+  const [byPage, byTab, byUser, byDay, recent, byUserTab] = await Promise.all([
     c.env.DB.prepare('SELECT page, COUNT(*) as views FROM page_views WHERE created_at >= ? GROUP BY page ORDER BY views DESC').bind(since).all(),
     c.env.DB.prepare('SELECT tab, COUNT(*) as views FROM page_views WHERE tab IS NOT NULL AND tab != "" AND created_at >= ? GROUP BY tab ORDER BY views DESC').bind(since).all(),
     c.env.DB.prepare('SELECT user_email, COUNT(*) as views FROM page_views WHERE created_at >= ? GROUP BY user_email ORDER BY views DESC LIMIT 20').bind(since).all(),
     c.env.DB.prepare("SELECT DATE(created_at) as day, COUNT(*) as views FROM page_views WHERE created_at >= ? GROUP BY DATE(created_at) ORDER BY day DESC LIMIT 30").bind(since).all(),
     c.env.DB.prepare('SELECT page, tab, user_email, created_at FROM page_views ORDER BY created_at DESC LIMIT 50').all(),
+    c.env.DB.prepare('SELECT user_email, tab, COUNT(*) as views FROM page_views WHERE tab IS NOT NULL AND tab != "" AND created_at >= ? GROUP BY user_email, tab ORDER BY user_email, views DESC').bind(since).all(),
   ]);
 
   const total = (byPage.results as any[]).reduce((s: number, r: any) => s + r.views, 0);
@@ -119,6 +120,7 @@ app.get('/api/analytics', async (c) => {
     byUser: byUser.results,
     byDay: byDay.results,
     recent: recent.results,
+    byUserTab: byUserTab.results,
   });
 });
 
@@ -3023,6 +3025,55 @@ app.get('/api/alerts', async (c) => {
 app.post('/api/alerts/:id/read', async (c) => {
   await c.env.DB.prepare('UPDATE alerts SET read = 1 WHERE id = ? AND user_email = ?').bind(c.req.param('id'), c.get('userEmail')).run();
   return c.json({ success: true });
+});
+
+// ── Alert → AI Product Suggestion ──────────────────────────────────
+const ALL_PRODUCTS = [
+  'Cloudflare CDN','Argo Smart Routing','Cache Reserve','Speed Brain','Waiting Room',
+  'WAF','DDoS Protection','Bot Management','API Shield','Page Shield','Turnstile',
+  'Cloudflare Access','Gateway','WARP','Browser Isolation','CASB','DLP','Email Security',
+  'Cloudflare DNS','DNS Firewall','DNSSEC','Secondary DNS',
+  'Workers','Workers KV','R2','D1','Durable Objects','Workers AI','Vectorize',
+  'Magic Transit','Magic WAN','Spectrum','Network Interconnect',
+];
+
+app.post('/api/alerts/:id/suggest-products', async (c) => {
+  const email = c.get('userEmail');
+  const alert = await c.env.DB.prepare('SELECT * FROM alerts WHERE id = ? AND user_email = ?').bind(c.req.param('id'), email).first() as any;
+  if (!alert) return c.json({ error: 'Alert not found' }, 404);
+
+  // Get account context if available
+  let accountCtx = '';
+  if (alert.account_id) {
+    const account = await c.env.DB.prepare('SELECT * FROM accounts WHERE id = ? AND user_email = ?').bind(alert.account_id, email).first() as any;
+    if (account) accountCtx = `Account: ${account.account_name}. Industry: ${account.industry || 'unknown'}. Current CDN: ${account.cdn_detected || 'unknown'}. Current DNS: ${account.dns_provider || 'unknown'}.`;
+  }
+
+  const system = `You are a Cloudflare solutions architect. Given a security or infrastructure alert, select the most relevant Cloudflare products that would help mitigate or address the issue. Return ONLY a JSON array of product names from this exact list — no commentary, no markdown:\n${ALL_PRODUCTS.join(', ')}`;
+
+  const prompt = `ALERT:
+- Type: ${alert.alert_type}
+- Title: ${alert.title}
+- Detail: ${alert.detail || 'N/A'}
+- Severity: ${alert.severity}
+${accountCtx ? '\nACCOUNT CONTEXT:\n' + accountCtx : ''}
+
+Return a JSON array of 3-6 of the most relevant product names from the list that directly address this alert. Only include products that are genuinely relevant.`;
+
+  try {
+    const raw = await runAI(c.env.AI, FAST_MODEL, system, prompt);
+    // Parse the JSON array from the AI response
+    const match = raw.match(/\[[\s\S]*?\]/);
+    if (match) {
+      const suggested: string[] = JSON.parse(match[0]);
+      // Filter to only valid product names
+      const valid = suggested.filter((p: string) => ALL_PRODUCTS.some(ap => ap.toLowerCase() === p.toLowerCase()));
+      return c.json({ products: valid });
+    }
+    return c.json({ products: [] });
+  } catch (e: any) {
+    return c.json({ products: [] });
+  }
 });
 
 // ── Alert → Email Generation (with product selection) ──────────────

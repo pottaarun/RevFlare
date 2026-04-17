@@ -139,6 +139,7 @@ function navigate(){
   else if(h.startsWith('#/share/'))renderShareView(m,h.split('/')[2]);
   else if(h==='#/analytics')renderAnalytics(m);
   else if(h==='#/email-stats')renderEmailStats(m);
+  else if(h==='#/mcp')renderMCPSettings(m);
   else if(h.startsWith('#/account/'))renderAccount(m,h.split('/')[2]);
   else renderDashboard(m);
 }
@@ -3871,6 +3872,200 @@ window.sendChatMessage = function(messageId, messageType) {
     btn.textContent = 'Send';
     appendChatBubble('assistant', 'Error: ' + e.message);
   });
+};
+
+// ── MCP Settings Page ─────────────────────────────────────────────
+
+// Known MCP servers that can be pre-configured
+var MCP_PRESETS = [
+  { name: 'netstrat', displayName: 'Netstrat Intelligence', desc: 'Cloudflare network strategy metrics per account' },
+  { name: 'google-workspace', displayName: 'Google Workspace', desc: 'Calendar, contacts, email context' },
+  { name: 'wiki', displayName: 'Wiki', desc: 'Internal knowledge base and competitive intel' },
+  { name: 'cloudflare-docs', displayName: 'Cloudflare Docs', desc: 'Product documentation for accurate email content' },
+  { name: 'jira', displayName: 'Jira', desc: 'Customer tickets, escalations, feature requests' },
+];
+
+function renderMCPSettings(c) {
+  c.innerHTML = '<div style="padding:32px;max-width:900px;margin:0 auto"><h2>MCP Integrations</h2><div class="spinner" style="margin:20px auto"></div></div>';
+
+  api.get('/mcp/servers').then(function(servers) {
+    var h = '<div style="padding:32px;max-width:900px;margin:0 auto">';
+    h += '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:24px">';
+    h += '<div><h2 style="margin-bottom:4px">MCP Integrations</h2>';
+    h += '<p style="color:var(--text-muted);font-size:12px;margin-bottom:0">Connect external data sources to enrich AI-generated research and emails.</p></div>';
+    h += '<button class="btn btn-primary btn-sm" id="mcp-add-btn">+ Add MCP Server</button>';
+    h += '</div>';
+
+    // RevFlare as MCP Server info card
+    h += '<div class="d-card" style="margin-bottom:24px;border-left:3px solid var(--green)">';
+    h += '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">';
+    h += '<span style="font-size:16px">&#x1F50C;</span>';
+    h += '<strong style="font-size:13px">RevFlare MCP Server</strong>';
+    h += '<span class="approval-badge approval-approved" style="font-size:10px">Active</span></div>';
+    h += '<p style="font-size:12px;color:var(--text-muted);margin-bottom:8px">External AI agents (Claude, Cursor, OpenCode) can connect to RevFlare to query your accounts, lead scores, research, and pipeline.</p>';
+    h += '<div style="background:var(--glass);border-radius:6px;padding:8px 12px;font-family:monospace;font-size:11px;color:var(--text-secondary)">';
+    h += 'Endpoint: <strong>POST ' + location.origin + '/api/mcp</strong></div></div>';
+
+    // Connected servers
+    if (servers.length) {
+      h += '<div class="persona-section-title" style="margin-bottom:12px">Connected Servers (' + servers.length + ')</div>';
+      for (var i = 0; i < servers.length; i++) {
+        var s = servers[i];
+        var toolCount = (s.tools || []).length;
+        h += '<div class="d-card" style="margin-bottom:12px" data-sid="' + s.id + '">';
+        h += '<div style="display:flex;justify-content:space-between;align-items:center">';
+        h += '<div style="display:flex;align-items:center;gap:10px">';
+        h += '<div style="width:8px;height:8px;border-radius:50%;background:' + (s.enabled ? 'var(--green)' : 'var(--text-muted)') + '"></div>';
+        h += '<div><strong style="font-size:13px">' + esc(s.display_name) + '</strong>';
+        h += '<div style="font-size:11px;color:var(--text-muted)">' + esc(s.server_url) + '</div></div></div>';
+        h += '<div style="display:flex;align-items:center;gap:6px">';
+        if (toolCount > 0) h += '<span style="font-size:10px;color:var(--text-muted);background:var(--glass);padding:2px 8px;border-radius:4px">' + toolCount + ' tools</span>';
+        h += '<button class="btn btn-ghost btn-sm mcp-discover-btn" data-id="' + s.id + '" style="font-size:11px">Discover Tools</button>';
+        h += '<button class="btn btn-ghost btn-sm mcp-toggle-btn" data-id="' + s.id + '" style="font-size:11px">' + (s.enabled ? 'Disable' : 'Enable') + '</button>';
+        h += '<button class="btn btn-ghost btn-sm mcp-delete-btn" data-id="' + s.id + '" style="font-size:11px;color:var(--red)">Remove</button>';
+        h += '</div></div>';
+
+        // Show tools if discovered
+        if (toolCount > 0) {
+          h += '<div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border-glass)">';
+          h += '<div style="font-size:10px;font-weight:700;color:var(--text-muted);text-transform:uppercase;margin-bottom:6px">Available Tools</div>';
+          h += '<div style="display:flex;flex-wrap:wrap;gap:4px">';
+          for (var t = 0; t < s.tools.length; t++) {
+            var tool = s.tools[t];
+            h += '<span title="' + esc(tool.description || '') + '" style="font-size:10px;padding:3px 8px;background:var(--glass);border-radius:4px;color:var(--text-secondary);cursor:help">' + esc(tool.name) + '</span>';
+          }
+          h += '</div></div>';
+        }
+        h += '</div>';
+      }
+    } else {
+      h += '<div class="d-card" style="text-align:center;padding:40px 20px;color:var(--text-muted)">';
+      h += '<div style="font-size:32px;margin-bottom:12px;opacity:0.3">&#x1F50C;</div>';
+      h += '<p style="font-size:13px;margin-bottom:4px">No MCP servers connected yet</p>';
+      h += '<p style="font-size:11px">Add a server to enrich AI research and emails with data from Netstrat, Jira, Wiki, and more.</p></div>';
+    }
+
+    // Quick-add presets
+    h += '<div class="persona-section-title" style="margin-top:28px;margin-bottom:12px">Quick Add</div>';
+    h += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:8px">';
+    var connectedNames = servers.map(function(s) { return s.name; });
+    for (var p = 0; p < MCP_PRESETS.length; p++) {
+      var preset = MCP_PRESETS[p];
+      var isConnected = connectedNames.indexOf(preset.name) >= 0;
+      h += '<div class="d-card" style="padding:12px;' + (isConnected ? 'opacity:0.5' : 'cursor:pointer') + '" ' + (isConnected ? '' : 'onclick="mcpQuickAdd(\'' + preset.name + '\',\'' + esc(preset.displayName) + '\')"') + '>';
+      h += '<div style="font-size:12px;font-weight:700;color:var(--text-primary)">' + esc(preset.displayName) + '</div>';
+      h += '<div style="font-size:11px;color:var(--text-muted);margin-top:2px">' + esc(preset.desc) + '</div>';
+      if (isConnected) h += '<div style="font-size:10px;color:var(--green);margin-top:4px">Connected</div>';
+      h += '</div>';
+    }
+    h += '</div>';
+
+    h += '</div>';
+    c.innerHTML = h;
+
+    // ── Event handlers ──
+    // Add server button
+    document.getElementById('mcp-add-btn').addEventListener('click', function() { mcpShowAddModal(); });
+
+    // Discover tools buttons
+    var discoverBtns = document.querySelectorAll('.mcp-discover-btn');
+    for (var d = 0; d < discoverBtns.length; d++) {
+      (function(btn) {
+        btn.addEventListener('click', function() {
+          btn.disabled = true; btn.textContent = 'Discovering...';
+          api.post('/mcp/servers/' + btn.dataset.id + '/discover').then(function(res) {
+            if (res.success) {
+              toast(res.count + ' tools discovered', 'success');
+              renderMCPSettings(c);
+            } else {
+              toast('Discovery failed: ' + (res.error || 'Unknown'), 'error');
+              btn.disabled = false; btn.textContent = 'Discover Tools';
+            }
+          }).catch(function(e) { toast('Error: ' + e.message, 'error'); btn.disabled = false; btn.textContent = 'Discover Tools'; });
+        });
+      })(discoverBtns[d]);
+    }
+
+    // Toggle buttons
+    var toggleBtns = document.querySelectorAll('.mcp-toggle-btn');
+    for (var tg = 0; tg < toggleBtns.length; tg++) {
+      (function(btn) {
+        btn.addEventListener('click', function() {
+          api.post('/mcp/servers/' + btn.dataset.id + '/toggle').then(function() { renderMCPSettings(c); });
+        });
+      })(toggleBtns[tg]);
+    }
+
+    // Delete buttons
+    var deleteBtns = document.querySelectorAll('.mcp-delete-btn');
+    for (var dl = 0; dl < deleteBtns.length; dl++) {
+      (function(btn) {
+        btn.addEventListener('click', function() {
+          if (!confirm('Remove this MCP server?')) return;
+          fetch('/api/mcp/servers/' + btn.dataset.id, { method: 'DELETE' }).then(function() { renderMCPSettings(c); });
+        });
+      })(deleteBtns[dl]);
+    }
+  }).catch(function(err) {
+    c.innerHTML = '<div style="padding:32px;color:var(--red)">' + err.message + '</div>';
+  });
+}
+
+// Modal: Add MCP server
+function mcpShowAddModal(presetName, presetDisplayName) {
+  var existing = document.getElementById('mcp-add-modal');
+  if (existing) existing.remove();
+
+  var modal = document.createElement('div');
+  modal.id = 'mcp-add-modal';
+  modal.style.cssText = 'position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center';
+  modal.innerHTML = '<div style="background:var(--bg-card);border:1px solid var(--border-glass);border-radius:16px;width:480px;padding:24px;box-shadow:0 20px 60px rgba(0,0,0,0.5)">'
+    + '<h3 style="margin-bottom:16px">Add MCP Server</h3>'
+    + '<div style="display:flex;flex-direction:column;gap:12px">'
+    + '<div><label style="font-size:11px;font-weight:700;color:var(--text-muted);text-transform:uppercase;display:block;margin-bottom:4px">Name (identifier)</label>'
+    + '<input id="mcp-name" type="text" value="' + (presetName || '') + '" placeholder="e.g. netstrat" style="width:100%;background:var(--glass);border:1px solid var(--border-glass);border-radius:8px;padding:8px 12px;font-size:12px;color:var(--text-primary);outline:none;font-family:inherit;box-sizing:border-box" /></div>'
+    + '<div><label style="font-size:11px;font-weight:700;color:var(--text-muted);text-transform:uppercase;display:block;margin-bottom:4px">Display Name</label>'
+    + '<input id="mcp-display" type="text" value="' + (presetDisplayName || '') + '" placeholder="e.g. Netstrat Intelligence" style="width:100%;background:var(--glass);border:1px solid var(--border-glass);border-radius:8px;padding:8px 12px;font-size:12px;color:var(--text-primary);outline:none;font-family:inherit;box-sizing:border-box" /></div>'
+    + '<div><label style="font-size:11px;font-weight:700;color:var(--text-muted);text-transform:uppercase;display:block;margin-bottom:4px">Server URL</label>'
+    + '<input id="mcp-url" type="text" placeholder="https://mcp-server.example.com/mcp" style="width:100%;background:var(--glass);border:1px solid var(--border-glass);border-radius:8px;padding:8px 12px;font-size:12px;color:var(--text-primary);outline:none;font-family:inherit;box-sizing:border-box" /></div>'
+    + '<div><label style="font-size:11px;font-weight:700;color:var(--text-muted);text-transform:uppercase;display:block;margin-bottom:4px">Auth Token <span style="font-weight:400">(optional)</span></label>'
+    + '<input id="mcp-token" type="password" placeholder="Bearer token or OAuth token" style="width:100%;background:var(--glass);border:1px solid var(--border-glass);border-radius:8px;padding:8px 12px;font-size:12px;color:var(--text-primary);outline:none;font-family:inherit;box-sizing:border-box" /></div>'
+    + '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px">'
+    + '<button class="btn btn-ghost" onclick="document.getElementById(\'mcp-add-modal\').remove()">Cancel</button>'
+    + '<button class="btn btn-primary" id="mcp-save-btn">Save & Connect</button>'
+    + '</div></div></div>';
+  document.body.appendChild(modal);
+  modal.addEventListener('click', function(e) { if (e.target === modal) modal.remove(); });
+
+  document.getElementById('mcp-save-btn').addEventListener('click', function() {
+    var name = document.getElementById('mcp-name').value.trim();
+    var displayName = document.getElementById('mcp-display').value.trim();
+    var serverUrl = document.getElementById('mcp-url').value.trim();
+    var authToken = document.getElementById('mcp-token').value.trim();
+
+    if (!name || !serverUrl) { toast('Name and Server URL are required', 'error'); return; }
+
+    var btn = document.getElementById('mcp-save-btn');
+    btn.disabled = true; btn.textContent = 'Connecting...';
+
+    api.post('/mcp/servers', {
+      name: name, displayName: displayName || name, serverUrl: serverUrl,
+      authToken: authToken || undefined
+    }).then(function(res) {
+      if (res.success) {
+        toast('MCP server added', 'success');
+        modal.remove();
+        navigate();
+      } else {
+        toast('Failed: ' + (res.error || 'Unknown'), 'error');
+        btn.disabled = false; btn.textContent = 'Save & Connect';
+      }
+    }).catch(function(e) { toast('Error: ' + e.message, 'error'); btn.disabled = false; btn.textContent = 'Save & Connect'; });
+  });
+}
+
+window.mcpQuickAdd = function(name, displayName) {
+  mcpShowAddModal(name, displayName);
 };
 
 // ── Copy Utility ───────────────────────────────────────────────────

@@ -440,6 +440,8 @@ Best regards`;
 }
 
 // ── Match incidents to account ─────────────────────────────────────
+// Match incidents to an account for display (broad: industry, country, name)
+// Used by the per-account threat intel tab to show relevant incidents
 export function matchIncidentsToAccount(incidents: ThreatIncident[], account: any): ThreatIncident[] {
   const industry = toLower(account.industry || '');
   const country = toLower(account.billing_country || '');
@@ -461,4 +463,20 @@ export function matchIncidentsToAccount(incidents: ThreatIncident[], account: an
     if (name.length > 3 && text.includes(name)) return true;
     return false;
   }).slice(0, 10);
+}
+
+// Strict match: only returns incidents that explicitly mention the account's name
+// or domain. Used for alert creation to avoid noisy industry/country matches.
+export function matchIncidentsByName(incidents: ThreatIncident[], account: any): ThreatIncident[] {
+  const name = toLower(account.account_name || '');
+  const domain = toLower((account.website_domain || account.website || '').replace(/^https?:\/\//, '').replace(/\/.*/, ''));
+
+  if (name.length <= 3 && !domain) return [];
+
+  return incidents.filter(inc => {
+    const text = toLower(inc.title + ' ' + inc.summary);
+    if (name.length > 3 && text.includes(name)) return true;
+    if (domain && domain.length > 4 && text.includes(domain)) return true;
+    return false;
+  }).slice(0, 5);
 }

@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import puppeteer from '@cloudflare/puppeteer';
-import { fetchThreatIntelligence, matchIncidentsToAccount } from './threat-intel';
+import { fetchThreatIntelligence, matchIncidentsToAccount, matchIncidentsByName } from './threat-intel';
 import { calculateLeadScore, calculateROI, scoreSimilarity, buildMeetingPrepPrompt, SEQUENCE_TEMPLATES, buildWinLossPrompt } from './advanced-features';
 
 // ── Types ──────────────────────────────────────────────────────────
@@ -5084,14 +5084,15 @@ const worker = {
         } catch (e) { console.error(`[Cron] Probe failed for ${a.account_name}:`, e); }
       }
 
-      // Match threat intel
+      // Match threat intel — only create alerts when the account name or domain
+      // is explicitly mentioned in the incident (no generic industry/country matches)
       try {
         const threats = await fetchThreatIntelligence(1, undefined, env.THREAT_CACHE);
         for (const a of accounts.results as any[]) {
-          const matched = matchIncidentsToAccount(threats.incidents, a);
+          const matched = matchIncidentsByName(threats.incidents, a);
           for (const inc of matched.slice(0, 2)) {
             await env.DB.prepare('INSERT INTO alerts (account_id, alert_type, title, detail, severity, user_email) VALUES (?,?,?,?,?,?)')
-              .bind(a.id, 'threat_match', 'Threat: ' + inc.title.slice(0, 80), 'Matched to ' + a.account_name + ' (' + (a.industry || '') + '). Score: ' + inc.score, inc.score > 80 ? 'critical' : 'high', email).run();
+              .bind(a.id, 'threat_match', 'Threat: ' + inc.title.slice(0, 80), a.account_name + ' was identified in this incident. Score: ' + inc.score, inc.score > 80 ? 'critical' : 'high', email).run();
           }
         }
       } catch (e) { console.error(`[Cron] Threat matching failed for ${email}:`, e); }

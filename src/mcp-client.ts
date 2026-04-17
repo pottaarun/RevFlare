@@ -2,6 +2,29 @@
 // Implements the Model Context Protocol (MCP) client over HTTP transport.
 // Designed to run inside a Cloudflare Worker (no stdio, no persistent connections).
 
+// Validate MCP server URL to prevent SSRF
+export function isValidMCPServerUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    // HTTPS only
+    if (parsed.protocol !== 'https:') return false;
+    const host = parsed.hostname.toLowerCase();
+    // Block IPs (v4, v6, decimal, octal)
+    if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) return false;
+    if (host.includes(':') || host.startsWith('[')) return false;
+    if (/^\d+$/.test(host)) return false;
+    if (/^0\d/.test(host.split('.')[0])) return false;
+    // Block localhost, private, reserved
+    if (/^(localhost|127\.|0\.|10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|169\.254\.)/i.test(host)) return false;
+    if (/\.(local|internal|svc|cluster|corp|lan|home|arpa)$/i.test(host)) return false;
+    // Must have a dot (real domain)
+    if (!host.includes('.')) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export interface MCPTool {
   name: string;
   description?: string;
@@ -41,7 +64,12 @@ function makeRequest(method: string, params?: any): JsonRpcRequest {
 }
 
 // Send a JSON-RPC request to an MCP server over HTTP
-async function sendMCPRequest(server: MCPServerConfig, method: string, params?: any): Promise<any> {
+async function sendMCPRequest(server: MCPServerConfig, method: string, params?: any, signal?: AbortSignal): Promise<any> {
+  // SSRF protection: validate the server URL before every fetch
+  if (!isValidMCPServerUrl(server.url)) {
+    throw new Error(`MCP server URL rejected (SSRF protection): ${server.url}`);
+  }
+
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     'Accept': 'application/json',
@@ -56,6 +84,7 @@ async function sendMCPRequest(server: MCPServerConfig, method: string, params?: 
     method: 'POST',
     headers,
     body,
+    signal,
   });
 
   if (!res.ok) {
@@ -153,10 +182,11 @@ export async function mcpCallToolSafe(
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
-    const result = await mcpCallTool(server, toolName, args);
+    const result = await sendMCPRequest(server, 'tools/call', { name: toolName, arguments: args }, controller.signal);
     clearTimeout(timeout);
 
-    return { text: mcpResultToText(result), durationMs: Date.now() - start };
+    const parsed = result || { content: [] };
+    return { text: mcpResultToText(parsed), durationMs: Date.now() - start };
   } catch (e: any) {
     return { text: '', error: e.message || 'MCP call failed', durationMs: Date.now() - start };
   }

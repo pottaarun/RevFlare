@@ -702,7 +702,7 @@ function renderGlobalThreats(c) {
                             + '<div class="email-body">' + md(emailBody) + '</div>'
                             + '<div class="email-actions"><button class="btn btn-primary btn-sm" onclick="copyEl(this,\'email\')">' + IC.copy + ' Copy Email</button></div></div>';
                         }).catch(function(err) {
-                          out.innerHTML = '<div style="padding:24px;color:var(--red);text-align:center">' + err.message + '</div>';
+                          out.innerHTML = '<div style="padding:24px;color:var(--red);text-align:center">' + esc(err.message) + '</div>';
                         });
                       });
                     })(picks[pi]);
@@ -714,7 +714,7 @@ function renderGlobalThreats(c) {
         })(globalEmailBtns[bi], i);
       }
     }).catch(function(err) {
-      results.innerHTML = '<div style="padding:32px;color:var(--red);text-align:center">' + err.message + '</div>';
+      results.innerHTML = '<div style="padding:32px;color:var(--red);text-align:center">' + esc(err.message) + '</div>';
     });
   }
 
@@ -853,7 +853,7 @@ function tabThreats(c, a) {
               btn.disabled = false;
               btn.innerHTML = IC.send + ' Draft Email';
             }).catch(function(err) {
-              out.innerHTML = '<div style="padding:24px;color:var(--red);text-align:center">' + err.message + '</div>';
+              out.innerHTML = '<div style="padding:24px;color:var(--red);text-align:center">' + esc(err.message) + '</div>';
               btn.disabled = false;
               btn.innerHTML = IC.send + ' Draft Email';
             });
@@ -861,7 +861,7 @@ function tabThreats(c, a) {
         })(emailBtns[i]);
       }
     }).catch(function(err) {
-      document.getElementById('acct-threat-results').innerHTML = '<div style="padding:24px;color:var(--red);text-align:center">' + err.message + '</div>';
+      document.getElementById('acct-threat-results').innerHTML = '<div style="padding:24px;color:var(--red);text-align:center">' + esc(err.message) + '</div>';
     });
   }
 
@@ -995,7 +995,7 @@ function tabCompetitive(c, a) {
             btn.style.opacity = '1';
             btn.textContent = compName;
           }).catch(function(err) {
-            out.innerHTML = '<div style="padding:32px;text-align:center"><div style="color:var(--red);font-size:14px;font-weight:600;margin-bottom:8px">Battlecard generation failed</div><div style="color:var(--text-muted);font-size:13px">' + (err.message || err) + '</div></div>';
+            out.innerHTML = '<div style="padding:32px;text-align:center"><div style="color:var(--red);font-size:14px;font-weight:600;margin-bottom:8px">Battlecard generation failed</div><div style="color:var(--text-muted);font-size:13px">' + (esc(err.message) || err) + '</div></div>';
             btn.style.opacity = '1';
             btn.textContent = compName;
           });
@@ -1003,7 +1003,7 @@ function tabCompetitive(c, a) {
       })(compBtns[i]);
     }
   }).catch(function(err) {
-    c.innerHTML = '<div style="padding:32px;color:var(--red)">Failed to load catalog: ' + (err.message || err) + '</div>';
+    c.innerHTML = '<div style="padding:32px;color:var(--red)">Failed to load catalog: ' + (esc(err.message) || err) + '</div>';
   });
 }
 
@@ -1131,8 +1131,8 @@ function tabMessaging(c,a){
 
       // Call async generator with explicit error catch
       generateEmail(a, cache).catch(function(err) {
-        if (mo) mo.innerHTML = '<div style="padding:32px;color:var(--red);text-align:center"><div style="font-size:18px;margin-bottom:8px">Generation failed</div><div style="font-size:13px">' + (err.message || err) + '</div></div>';
-        toast('Email generation failed: ' + (err.message || err), 'error');
+        if (mo) mo.innerHTML = '<div style="padding:32px;color:var(--red);text-align:center"><div style="font-size:18px;margin-bottom:8px">Generation failed</div><div style="font-size:13px">' + (esc(err.message) || err) + '</div></div>';
+        toast('Email generation failed: ' + (esc(err.message) || err), 'error');
       });
     });
   }
@@ -1416,7 +1416,7 @@ async function generateEmail(a, cache) {
     regenBtn.addEventListener('click', function() {
       mo.innerHTML = '<div style="padding:48px;text-align:center"><div class="spinner" style="margin:0 auto 16px"></div><div style="color:var(--text-secondary);font-size:14px">Regenerating...</div></div>';
       generateEmail(a, cache).catch(function(err) {
-        mo.innerHTML = '<div style="padding:32px;color:var(--red)">Error: ' + (err.message || err) + '</div>';
+        mo.innerHTML = '<div style="padding:32px;color:var(--red)">Error: ' + (esc(err.message) || err) + '</div>';
       });
     });
   }
@@ -1565,10 +1565,10 @@ function renderCampaigns(c) {
         var checked = selectedAccountIds.indexOf(a.id) >= 0 ? ' checked' : '';
         html += '<tr style="cursor:pointer" data-row-id="' + a.id + '">';
         html += '<td style="padding:8px 12px"><input type="checkbox" class="acct-cb" data-id="' + a.id + '" style="accent-color:var(--accent)"' + checked + ' /></td>';
-        html += '<td style="font-weight:600;color:var(--text-primary)">' + a.account_name + '</td>';
-        html += '<td style="font-size:12px;color:var(--text-muted)">' + (a.industry || '--') + '</td>';
-        html += '<td><span class="stack-chip' + ((a.cdn_primary||'').toLowerCase().includes('cloudflare')?' is-cf':'') + '">' + truncate(a.cdn_primary,15) + '</span></td>';
-        html += '<td><span class="stack-chip">' + truncate(a.security_primary,15) + '</span></td>';
+        html += '<td style="font-weight:600;color:var(--text-primary)">' + esc(a.account_name) + '</td>';
+        html += '<td style="font-size:12px;color:var(--text-muted)">' + esc(a.industry || '--') + '</td>';
+        html += '<td><span class="stack-chip' + ((a.cdn_primary||'').toLowerCase().includes('cloudflare')?' is-cf':'') + '">' + esc(truncate(a.cdn_primary,15)) + '</span></td>';
+        html += '<td><span class="stack-chip">' + esc(truncate(a.security_primary,15)) + '</span></td>';
         html += '<td style="font-weight:600">' + fmtD(a.total_it_spend) + '</td>';
         html += '<td>' + statusPill(a.account_status) + '</td>';
         html += '</tr>';
@@ -1742,14 +1742,14 @@ function renderCampaigns(c) {
         toast('Campaign created with ' + result.totalAccounts + ' accounts', 'success');
         location.hash = '#/campaign/' + result.id;
       }).catch(function(err) {
-        toast('Error: ' + err.message, 'error');
+        toast('Error: ' + esc(err.message), 'error');
         createBtn.disabled = false;
         createBtn.innerHTML = IC.send + ' Create & Generate Campaign';
       });
     });
 
   }).catch(function(err) {
-    c.innerHTML = '<div style="padding:32px;color:var(--red)">' + err.message + '</div>';
+    c.innerHTML = '<div style="padding:32px;color:var(--red)">' + esc(err.message) + '</div>';
   });
 }
 
@@ -1870,15 +1870,15 @@ function renderCampaignDetail(c, id) {
       h += '<div class="approval-recipient-body" style="padding:10px 16px">';
       h += '<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">';
       h += '<div>';
-      h += '<div class="approval-recipient-name" style="font-size:14px">' + e.account_name + '</div>';
+      h += '<div class="approval-recipient-name" style="font-size:14px">' + esc(e.account_name) + '</div>';
       h += '<div class="approval-recipient-details" style="margin-top:2px">';
-      if (e.website || e.website_domain) h += '<span>' + (e.website || e.website_domain) + '</span>';
-      if (e.industry) h += '<span>' + e.industry + '</span>';
-      if (eLocStr) h += '<span>' + eLocStr + '</span>';
+      if (e.website || e.website_domain) h += '<span>' + esc(e.website || e.website_domain) + '</span>';
+      if (e.industry) h += '<span>' + esc(e.industry) + '</span>';
+      if (eLocStr) h += '<span>' + esc(eLocStr) + '</span>';
       h += '</div>';
       if (e.total_it_spend || e.account_status) {
         h += '<div class="approval-recipient-meta" style="margin-top:4px">';
-        if (e.account_status) h += '<span class="approval-meta-chip' + (e.account_status === 'Active' ? ' chip-active' : '') + '">' + e.account_status + '</span>';
+        if (e.account_status) h += '<span class="approval-meta-chip' + (e.account_status === 'Active' ? ' chip-active' : '') + '">' + esc(e.account_status) + '</span>';
         if (e.total_it_spend) h += '<span class="approval-meta-chip">IT Spend: ' + fmtD(e.total_it_spend) + '/mo</span>';
         if (e.cdn_primary) h += '<span class="approval-meta-chip">CDN: ' + e.cdn_primary + '</span>';
         h += '</div>';
@@ -1972,7 +1972,7 @@ function renderCampaignDetail(c, id) {
       clearInterval(animInterval);
       prog.innerHTML = '<div class="d-card" style="border-color:rgba(248,113,113,0.3);text-align:center;padding:24px">'
         + '<div style="color:var(--red);font-size:15px;font-weight:700;margin-bottom:8px">Generation failed</div>'
-        + '<div style="color:var(--text-muted);font-size:13px;margin-bottom:16px">' + (err.message || err) + '</div>'
+        + '<div style="color:var(--text-muted);font-size:13px;margin-bottom:16px">' + (esc(err.message) || err) + '</div>'
         + '<button class="btn btn-primary" onclick="renderCampaignDetail(document.getElementById(\'main\'),\'' + id + '\')">' + IC.sparkles + ' Retry</button>'
         + '</div>';
     }
@@ -2208,7 +2208,7 @@ function renderCampaignDetail(c, id) {
     }
 
   }).catch(function(err) {
-    c.innerHTML = '<div style="padding:32px;color:var(--red)">' + err.message + '</div>';
+    c.innerHTML = '<div style="padding:32px;color:var(--red)">' + esc(err.message) + '</div>';
   });
 }
 
@@ -2310,7 +2310,7 @@ function renderShareView(container, token) {
     }
 
   }).catch(function(err) {
-    container.innerHTML = '<div class="empty-state"><div style="font-size:48px;opacity:0.3;margin-bottom:16px">' + IC.shield + '</div><h2 class="page-title" style="font-size:22px">' + err.message + '</h2><p class="page-subtitle" style="margin-top:8px">This share link may be invalid or expired.</p></div>';
+    container.innerHTML = '<div class="empty-state"><div style="font-size:48px;opacity:0.3;margin-bottom:16px">' + IC.shield + '</div><h2 class="page-title" style="font-size:22px">' + esc(err.message) + '</h2><p class="page-subtitle" style="margin-top:8px">This share link may be invalid or expired.</p></div>';
   });
 }
 
@@ -2535,7 +2535,7 @@ function renderLeadScores(c) {
     h += '</tbody></table></div></div></div>';
     c.innerHTML = h;
   }).catch(function(err) {
-    c.innerHTML = '<div style="padding:32px;color:var(--red)">' + err.message + '</div>';
+    c.innerHTML = '<div style="padding:32px;color:var(--red)">' + esc(err.message) + '</div>';
   });
 }
 
@@ -2764,7 +2764,7 @@ function renderAlerts(c) {
             btn.disabled = false;
             btn.innerHTML = IC.sparkles + ' Regenerate Email';
           }).catch(function(err) {
-            out.innerHTML = '<div style="color:var(--red);padding:12px">' + esc(err.message || err) + '</div>';
+            out.innerHTML = '<div style="color:var(--red);padding:12px">' + esc(esc(err.message) || err) + '</div>';
             btn.disabled = false;
             btn.innerHTML = IC.sparkles + ' Generate Outreach Email';
           });
@@ -2772,7 +2772,7 @@ function renderAlerts(c) {
       })(genBtns[i]);
     }
   }).catch(function(err) {
-    c.innerHTML = '<div style="padding:32px;color:var(--red)">' + err.message + '</div>';
+    c.innerHTML = '<div style="padding:32px;color:var(--red)">' + esc(err.message) + '</div>';
   });
 }
 
@@ -2826,7 +2826,7 @@ function renderTeamDashboard(c) {
     h += '</tbody></table></div></div></div>';
     c.innerHTML = h;
   }).catch(function(err) {
-    c.innerHTML = '<div style="padding:32px;color:var(--red)">' + err.message + '</div>';
+    c.innerHTML = '<div style="padding:32px;color:var(--red)">' + esc(err.message) + '</div>';
   });
 }
 
@@ -3027,13 +3027,13 @@ function renderPipeline(c) {
           });
         }
       }).catch(function(err) {
-        agentOut.innerHTML = '<div class="d-card" style="border-color:rgba(248,113,113,0.3)"><div style="color:var(--red);font-weight:700;margin-bottom:6px">Agent Failed</div><div style="font-size:13px;color:var(--text-muted)">' + (err.message || err) + '</div></div>';
+        agentOut.innerHTML = '<div class="d-card" style="border-color:rgba(248,113,113,0.3)"><div style="color:var(--red);font-weight:700;margin-bottom:6px">Agent Failed</div><div style="font-size:13px;color:var(--text-muted)">' + (esc(err.message) || err) + '</div></div>';
         btn.disabled = false;
         btn.innerHTML = IC.sparkles + ' Auto-Generate';
       });
     });
   }).catch(function(err) {
-    c.innerHTML = '<div style="padding:32px;color:var(--red)">' + err.message + '</div>';
+    c.innerHTML = '<div style="padding:32px;color:var(--red)">' + esc(err.message) + '</div>';
   });
 }
 
@@ -3132,7 +3132,7 @@ function renderPlaybooks(c) {
       })(useBtns[i]);
     }
   }).catch(function(err) {
-    c.innerHTML = '<div style="padding:32px;color:var(--red)">' + err.message + '</div>';
+    c.innerHTML = '<div style="padding:32px;color:var(--red)">' + esc(err.message) + '</div>';
   });
 }
 
@@ -3180,7 +3180,7 @@ function renderSearch(c, query) {
       }
     });
   }).catch(function(err) {
-    c.innerHTML = '<div style="padding:32px;color:var(--red)">' + err.message + '</div>';
+    c.innerHTML = '<div style="padding:32px;color:var(--red)">' + esc(err.message) + '</div>';
   });
 }
 
@@ -3703,7 +3703,7 @@ function renderAnalytics(c) {
       })(userRows[i], i);
     }
   }).catch(function(err) {
-    c.innerHTML = '<div style="padding:32px;color:var(--red)">' + err.message + '</div>';
+    c.innerHTML = '<div style="padding:32px;color:var(--red)">' + esc(err.message) + '</div>';
   });
 }
 
@@ -3764,7 +3764,7 @@ function renderEmailStats(c) {
     html += '</div>';
     c.innerHTML = html;
   }).catch(function(err) {
-    c.innerHTML = '<div style="padding:32px;color:var(--red)">' + err.message + '</div>';
+    c.innerHTML = '<div style="padding:32px;color:var(--red)">' + esc(err.message) + '</div>';
   });
 }
 
@@ -4007,7 +4007,7 @@ function renderMCPSettings(c) {
       })(deleteBtns[dl]);
     }
   }).catch(function(err) {
-    c.innerHTML = '<div style="padding:32px;color:var(--red)">' + err.message + '</div>';
+    c.innerHTML = '<div style="padding:32px;color:var(--red)">' + esc(err.message) + '</div>';
   });
 }
 

@@ -3,7 +3,7 @@ import { cors } from 'hono/cors';
 import puppeteer from '@cloudflare/puppeteer';
 import { fetchThreatIntelligence, matchIncidentsToAccount, matchIncidentsByName } from './threat-intel';
 import { calculateLeadScore, calculateROI, scoreSimilarity, buildMeetingPrepPrompt, SEQUENCE_TEMPLATES, buildWinLossPrompt } from './advanced-features';
-import { mcpInitialize, mcpListTools, mcpCallToolSafe, gatherMCPContext, type MCPTool } from './mcp-client';
+import { mcpInitialize, mcpListTools, mcpCallToolSafe, gatherMCPContext, isValidMCPServerUrl, type MCPTool } from './mcp-client';
 
 // ── Types ──────────────────────────────────────────────────────────
 type Bindings = {
@@ -131,7 +131,7 @@ interface AlertRow { id: number; account_id: number | null; alert_type: string; 
 const app = new Hono<{ Bindings: Bindings; Variables: { userEmail: string } }>();
 app.use('/api/*', cors({
   origin: (origin) => {
-    if (!origin) return '*'; // same-origin requests (no Origin header)
+    if (!origin) return 'https://revflare.arunpotta1024.workers.dev'; // same-origin requests
     // Whitelist: only this specific worker + localhost for dev
     if (origin === 'https://revflare.arunpotta1024.workers.dev') return origin;
     if (origin.startsWith('http://localhost:') || origin.startsWith('http://127.0.0.1:')) return origin;
@@ -246,10 +246,9 @@ app.use('/api/*', async (c, next) => {
     console.error('SECURITY: JWT present but CF_ACCESS_TEAM_DOMAIN not set. Rejecting unverified token.');
   }
 
-  // 2. Fallback: Cf-Access-Authenticated-User-Email header (only trusted when Access is configured)
-  if (!email && c.env.CF_ACCESS_TEAM_DOMAIN) {
-    email = c.req.header('Cf-Access-Authenticated-User-Email') || '';
-  }
+  // 2. Cf-Access-Authenticated-User-Email header — only trusted when JWT was verified
+  //    (This header alone can be spoofed; it's only safe when Access gateway sets it alongside a valid JWT)
+  // Removed: trusting this header without JWT verification is an auth bypass vector.
 
   // 3. Local dev only: explicit DEV_MODE env var required (not header sniffing)
   if (!email && c.env.DEV_MODE === 'true') {
@@ -764,13 +763,19 @@ function getCompetitorMapping(account: any): { category: string; competitor: str
 // ── SSRF Prevention: validate domains before external fetch ────────
 function isValidExternalDomain(domain: string): boolean {
   if (!domain) return false;
-  const clean = domain.replace(/^https?:\/\//, '').replace(/\/.*/, '').replace(/:.*/, '').toLowerCase().trim();
-  // Block IP addresses (IPv4)
+  // Strip protocol, path, port, auth
+  const clean = domain.replace(/^https?:\/\//, '').replace(/\/.*/, '').replace(/:.*/, '').replace(/.*@/, '').toLowerCase().trim();
+  // Block IP addresses (IPv4 dotted, decimal, octal)
   if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(clean)) return false;
+  if (/^\d+$/.test(clean)) return false; // Decimal IP (e.g., 2130706433)
+  if (/^0\d/.test(clean.split('.')[0])) return false; // Octal IP (e.g., 0177.0.0.1)
+  // Block IPv6 addresses (any form)
+  if (clean.includes(':') || clean.startsWith('[')) return false;
   // Block localhost, private ranges, link-local, loopback
-  if (/^(localhost|127\.|0\.|10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|169\.254\.|::1|fc|fd|\[::)/i.test(clean)) return false;
-  // Block internal/reserved domains
+  if (/^(localhost|127\.|0\.|10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|169\.254\.)/i.test(clean)) return false;
+  // Block internal/reserved/cloud metadata domains
   if (/\.(local|internal|svc|cluster|corp|lan|home|arpa)$/i.test(clean)) return false;
+  if (clean === 'metadata.google.internal' || clean.endsWith('.amazonaws.com')) return false;
   // Require at least one dot (valid domain)
   if (!clean.includes('.')) return false;
   // Block empty or overly long domains
@@ -2392,7 +2397,7 @@ app.get('/api/public/track/:trackingId/pixel.gif', async (c) => {
 // ── Unsubscribe endpoint (NO auth required) ────────────────────────
 // GET shows confirmation page, POST processes the unsubscribe
 app.get('/api/public/unsubscribe/:trackingId', async (c) => {
-  const trackingId = c.req.param('trackingId');
+  const trackingId = c.req.param('trackingId').replace(/[^a-zA-Z0-9]/g, ''); // Sanitize
   return c.html(`<html><body style="background:#08090a;color:#f7f8f8;font-family:Inter,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;text-align:center">
     <div><h2>Unsubscribe</h2><p style="color:#8a8f98;margin-bottom:20px">Are you sure you want to unsubscribe from future emails?</p>
     <form method="POST" action="/api/public/unsubscribe/${trackingId}">
@@ -2729,6 +2734,11 @@ app.post('/api/mcp/servers', async (c) => {
   }>();
   if (!name || !serverUrl) return c.json({ error: 'name and serverUrl required' }, 400);
 
+  // SSRF protection: validate the server URL
+  if (!isValidMCPServerUrl(serverUrl)) {
+    return c.json({ error: 'Invalid server URL. Must be HTTPS and a valid external domain.' }, 400);
+  }
+
   // Encrypt the auth token
   const encToken = authToken ? await encryptValue(authToken, 'mcp_token_' + email + '_' + name) : null;
 
@@ -2948,6 +2958,8 @@ async function decryptValue(stored: string, keyName: string): Promise<string> {
 
 // Save settings (encrypted)
 app.post('/api/settings', async (c) => {
+  // Admin only — these are global OAuth credentials that affect all users
+  if (!isAdmin(c.get('userEmail'))) return c.json({ error: 'Admin access required to modify settings' }, 403);
   const { key, value } = await c.req.json<{ key: string; value: string }>();
   const allowedKeys = ['google_client_id', 'google_client_secret', 'intricately_api_key', 'news_api_key', 'gnews_api_key', 'mediastack_api_key', 'sf_client_id', 'sf_client_secret'];
   if (!allowedKeys.includes(key)) return c.json({ error: 'Invalid setting' }, 400);
@@ -3092,7 +3104,7 @@ app.get('/api/gmail/callback', async (c) => {
     <html><body style="background:#08090a;color:#f7f8f8;font-family:Inter,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;text-align:center">
       <div>
         <h2 style="color:#34d399">Gmail Connected!</h2>
-        <p>${profile.email} is now linked to RevFlare.</p>
+        <p>${(profile.email || '').replace(/[<>&"']/g, '')} is now linked to RevFlare.</p>
         <p>You can close this window and return to RevFlare.</p>
         <script>setTimeout(function(){ window.close(); }, 2000);</script>
       </div>
@@ -5519,10 +5531,14 @@ const worker = {
           if (!touch?.content || touch.channel !== 'email') {
             // Skip non-email touches (LinkedIn, phone), advance to next
             const nextTouch = currentTouch + 1;
-            const nextDay = touches[nextTouch]?.day || 0;
-            const nextSendAt = nextTouch < touches.length ? `datetime('now', '+${nextDay} days')` : null;
-            await env.DB.prepare(`UPDATE sequences SET current_touch = ?, next_send_at = ${nextSendAt ? nextSendAt : 'NULL'} WHERE id = ?`)
-              .bind(nextTouch, seq.id).run();
+            const nextDayRaw = parseInt(touches[nextTouch]?.day) || 0;
+            if (nextTouch < touches.length) {
+              await env.DB.prepare("UPDATE sequences SET current_touch = ?, next_send_at = datetime('now', '+' || ? || ' days') WHERE id = ?")
+                .bind(nextTouch, Math.max(1, nextDayRaw), seq.id).run();
+            } else {
+              await env.DB.prepare("UPDATE sequences SET current_touch = ?, next_send_at = NULL WHERE id = ?")
+                .bind(nextTouch, seq.id).run();
+            }
             continue;
           }
 
@@ -5562,9 +5578,9 @@ const worker = {
               await env.DB.prepare("UPDATE sequences SET current_touch = ?, status = 'completed', next_send_at = NULL WHERE id = ?")
                 .bind(nextTouch, seq.id).run();
             } else {
-              const nextDay = (touches[nextTouch]?.day || 0) - (touch.day || 0);
-              await env.DB.prepare(`UPDATE sequences SET current_touch = ?, next_send_at = datetime('now', '+${Math.max(1, nextDay)} days') WHERE id = ?`)
-                .bind(nextTouch, seq.id).run();
+              const nextDaySafe = Math.max(1, parseInt(String((touches[nextTouch]?.day || 0) - (touch.day || 0))) || 1);
+              await env.DB.prepare("UPDATE sequences SET current_touch = ?, next_send_at = datetime('now', '+' || ? || ' days') WHERE id = ?")
+                .bind(nextTouch, nextDaySafe, seq.id).run();
             }
             console.log(`[Cron] Sequence ${seq.id} touch ${currentTouch + 1} sent to ${seq.to_address}`);
           }

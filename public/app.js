@@ -388,13 +388,13 @@ async function renderAccount(c,id){
       <div class="acct-hero">
         <div class="acct-hero-top">
           <div>
-            <h1 class="acct-name">${a.account_name}</h1>
+            <h1 class="acct-name">${esc(a.account_name)}</h1>
             <div class="acct-meta-row">
               ${statusPill(a.account_status)}
-              ${a.industry?`<span class="acct-meta-item">${IC.building} ${a.industry}</span>`:''}
-              ${a.website?`<span class="acct-meta-item">${IC.globe} <a href="https://${a.website}" target="_blank">${a.website}</a></span>`:''}
-              ${a.billing_country?`<span class="acct-meta-item">${[a.billing_city,a.billing_state,a.billing_country].filter(Boolean).join(', ')}</span>`:''}
-              ${a.linkedin_url?`<span class="acct-meta-item"><a href="${a.linkedin_url}" target="_blank">${IC.linkedin} ${a.linkedin_followers?fmt(a.linkedin_followers)+' followers':'LinkedIn'}</a></span>`:''}
+              ${a.industry?`<span class="acct-meta-item">${IC.building} ${esc(a.industry)}</span>`:''}
+              ${a.website?`<span class="acct-meta-item">${IC.globe} <a href="https://${encodeURI(a.website)}" target="_blank" rel="noopener">${esc(a.website)}</a></span>`:''}
+              ${a.billing_country?`<span class="acct-meta-item">${[a.billing_city,a.billing_state,a.billing_country].filter(Boolean).map(esc).join(', ')}</span>`:''}
+              ${a.linkedin_url?`<span class="acct-meta-item"><a href="${encodeURI(a.linkedin_url)}" target="_blank" rel="noopener">${IC.linkedin} ${a.linkedin_followers?fmt(a.linkedin_followers)+' followers':'LinkedIn'}</a></span>`:''}
             </div>
           </div>
           <div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px;flex-shrink:0">
@@ -809,12 +809,12 @@ function tabThreats(c, a) {
         rh += '<div style="text-align:center;flex-shrink:0;min-width:40px"><div style="font-size:18px;font-weight:800;color:' + sev + '">' + inc.score + '</div><div style="font-size:8px;color:var(--text-muted);font-weight:700">SEVERITY</div></div>';
         rh += '<div style="flex:1">';
         if (inc.isNew) rh += '<span style="font-size:9px;padding:2px 5px;background:rgba(251,146,60,0.12);color:#fb923c;border-radius:3px;font-weight:700;margin-right:4px">NEW</span>';
-        rh += '<span style="font-size:13px;font-weight:700;color:var(--text-primary)">' + inc.title + '</span>';
-        rh += '<div style="font-size:11px;color:var(--text-muted);margin-top:3px">' + inc.source;
-        if (inc.country) rh += ' &middot; ' + inc.country;
-        if (inc.product) rh += ' &middot; ' + inc.product;
+        rh += '<span style="font-size:13px;font-weight:700;color:var(--text-primary)">' + esc(inc.title) + '</span>';
+        rh += '<div style="font-size:11px;color:var(--text-muted);margin-top:3px">' + esc(inc.source);
+        if (inc.country) rh += ' &middot; ' + esc(inc.country);
+        if (inc.product) rh += ' &middot; ' + esc(inc.product);
         rh += ' &middot; ' + (inc.publishedAt ? new Date(inc.publishedAt).toLocaleDateString() : '') + '</div>';
-        if (inc.summary) rh += '<p style="font-size:12px;color:var(--text-tertiary);margin-top:5px;line-height:1.5">' + inc.summary.slice(0, 180) + '</p>';
+        if (inc.summary) rh += '<p style="font-size:12px;color:var(--text-tertiary);margin-top:5px;line-height:1.5">' + esc(inc.summary.slice(0, 180)) + '</p>';
         if (prods.length) { rh += '<div style="display:flex;flex-wrap:wrap;gap:3px;margin-top:6px">'; for (var j=0;j<prods.length;j++) rh += '<span class="stack-chip is-cf" style="font-size:10px;padding:2px 6px">' + prods[j] + '</span>'; rh += '</div>'; }
         rh += '<div style="display:flex;gap:6px;margin-top:8px">';
         rh += '<button class="btn btn-primary btn-sm gen-acct-threat-email" data-idx="' + i + '">' + IC.send + ' Draft Email</button>';
@@ -1428,7 +1428,7 @@ async function tabHistory(c,a){
     const[research,messages]=await Promise.all([api.get(`/research/${a.id}`),api.get(`/messaging/${a.id}`)]);
     const items=[...research.map(r=>({...r,kind:'research'})),...messages.map(m=>({...m,kind:'message'}))].sort((a,b)=>new Date(b.created_at)-new Date(a.created_at));
     if(!items.length){c.innerHTML=`<div class="fade-in" style="text-align:center;padding:60px 0;color:var(--text-muted)"><div style="font-size:32px;margin-bottom:12px;opacity:0.3">${IC.clock}</div><p>No research or messages generated yet.</p><p style="font-size:12px;margin-top:4px">Use the Deep Research and Email Composer tabs above.</p></div>`;return;}
-    c.innerHTML=`<div class="fade-in"><p style="font-size:13px;color:var(--text-muted);margin-bottom:20px">${items.length} items generated</p>${items.map((it,i)=>`<div class="history-item" data-i="${i}"><div class="history-item-head"><span class="history-item-title">${it.kind==='research'?(it.title||it.report_type):`${(it.persona||'').toUpperCase()}: ${it.message_type}`}</span><span class="history-item-date">${timeAgo(it.created_at)}</span></div><div class="history-item-preview">${(it.content||'').slice(0,180)}...</div></div>`).join('')}<div id="hd"></div></div>`;
+    c.innerHTML=`<div class="fade-in"><p style="font-size:13px;color:var(--text-muted);margin-bottom:20px">${items.length} items generated</p>${items.map((it,i)=>`<div class="history-item" data-i="${i}"><div class="history-item-head"><span class="history-item-title">${esc(it.kind==='research'?(it.title||it.report_type):`${(it.persona||'').toUpperCase()}: ${it.message_type}`)}</span><span class="history-item-date">${timeAgo(it.created_at)}</span></div><div class="history-item-preview">${esc((it.content||'').slice(0,180))}...</div></div>`).join('')}<div id="hd"></div></div>`;
     $$('.history-item').forEach(el=>el.onclick=()=>{
       const it=items[+el.dataset.i];
       $('#hd').innerHTML=`<div class="output-card slide-up" style="margin-top:16px"><div class="output-header"><div class="output-header-left"><div class="output-header-title">${it.kind==='research'?(it.title||it.report_type):`${(it.persona||'').toUpperCase()}: ${it.message_type}`}</div></div><button class="btn btn-ghost btn-sm" onclick="copyEl(this)">${IC.copy} Copy</button></div><div class="output-body">${md(it.content)}</div></div>`;

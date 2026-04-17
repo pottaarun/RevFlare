@@ -131,9 +131,9 @@ const app = new Hono<{ Bindings: Bindings; Variables: { userEmail: string } }>()
 app.use('/api/*', cors({
   origin: (origin) => {
     if (!origin) return '*'; // same-origin requests (no Origin header)
-    // Whitelist: only workers.dev subdomains and local dev
-    if (origin.endsWith('.workers.dev')) return origin;
-    if (origin.includes('localhost') || origin.includes('127.0.0.1')) return origin;
+    // Whitelist: only this specific worker + localhost for dev
+    if (origin === 'https://revflare.arunpotta1024.workers.dev') return origin;
+    if (origin.startsWith('http://localhost:') || origin.startsWith('http://127.0.0.1:')) return origin;
     // Deny all other cross-origin requests
     return null as any;
   },
@@ -218,6 +218,10 @@ app.onError((err, c) => {
 // ── Initialize encryption secret from env on every request ─────────
 app.use('/api/*', async (c, next) => {
   setEncSecret(c.env.ENC_SECRET);
+  if (!c.env.ENC_SECRET && c.env.CF_ACCESS_TEAM_DOMAIN) {
+    // In production (Access configured), ENC_SECRET is mandatory
+    return c.json({ error: 'Server misconfigured: ENC_SECRET is required. Run: wrangler secret put ENC_SECRET' }, 500);
+  }
   if (!c.env.ENC_SECRET) console.warn('ENC_SECRET not set — encryption keys derived without a secret. Run: wrangler secret put ENC_SECRET');
   await next();
 });
@@ -237,13 +241,8 @@ app.use('/api/*', async (c, next) => {
     const verified = await verifyAccessJWT(jwt, c.env.CF_ACCESS_TEAM_DOMAIN, c.env.CF_ACCESS_AUD);
     if (verified) email = verified.email;
   } else if (jwt) {
-    // Fallback: decode without verification if team domain not configured (log warning)
-    console.warn('CF_ACCESS_TEAM_DOMAIN not set — JWT signature NOT verified. Set this secret for production security.');
-    try {
-      const payload = jwt.split('.')[1];
-      const decoded = JSON.parse(atob(payload.replace(/-/g, '+').replace(/_/g, '/')));
-      email = decoded.email || '';
-    } catch (e) { console.error('JWT decode failed:', e); }
+    // CF_ACCESS_TEAM_DOMAIN not configured — reject JWT, do not decode unverified tokens
+    console.error('SECURITY: JWT present but CF_ACCESS_TEAM_DOMAIN not set. Rejecting unverified token.');
   }
 
   // 2. Fallback: Cf-Access-Authenticated-User-Email header (set by Access gateway)
@@ -320,8 +319,9 @@ app.get('/api/analytics', async (c) => {
   });
 });
 
-// ── Global platform stats (all users combined) ────────────────────
+// ── Global platform stats (admin only) ────────────────────────────
 app.get('/api/platform-stats', async (c) => {
+  if (!isAdmin(c.get('userEmail'))) return c.json({ error: 'Admin access required' }, 403);
   const [emails, research, campaigns, users] = await Promise.all([
     c.env.DB.prepare('SELECT COUNT(*) as cnt FROM persona_messages').first(),
     c.env.DB.prepare('SELECT COUNT(*) as cnt FROM research_reports').first(),
@@ -2349,17 +2349,20 @@ app.get('/api/public/track/:trackingId/pixel.gif', async (c) => {
   // Fire-and-forget: record the open without blocking the response
   c.executionCtx.waitUntil((async () => {
     try {
-      // Find which message this tracking ID belongs to
+      // Deduplicate: only count the first open per tracking ID (subsequent loads are email client prefetches etc.)
+      const existing = await c.env.DB.prepare('SELECT id FROM email_opens WHERE tracking_id = ? LIMIT 1').bind(trackingId).first();
+      const isFirstOpen = !existing;
+
       const pm = await c.env.DB.prepare('SELECT id, user_email FROM persona_messages WHERE tracking_id = ?').bind(trackingId).first() as any;
       if (pm) {
-        await c.env.DB.prepare('UPDATE persona_messages SET open_count = open_count + 1 WHERE id = ?').bind(pm.id).run();
+        if (isFirstOpen) await c.env.DB.prepare('UPDATE persona_messages SET open_count = open_count + 1 WHERE id = ?').bind(pm.id).run();
         await c.env.DB.prepare('INSERT INTO email_opens (tracking_id, source_type, source_id, user_email) VALUES (?,?,?,?)')
           .bind(trackingId, 'persona_message', pm.id, pm.user_email).run();
         return;
       }
       const ce = await c.env.DB.prepare('SELECT id FROM campaign_emails WHERE tracking_id = ?').bind(trackingId).first() as any;
       if (ce) {
-        await c.env.DB.prepare('UPDATE campaign_emails SET open_count = open_count + 1 WHERE id = ?').bind(ce.id).run();
+        if (isFirstOpen) await c.env.DB.prepare('UPDATE campaign_emails SET open_count = open_count + 1 WHERE id = ?').bind(ce.id).run();
         const campaign = await c.env.DB.prepare('SELECT user_email FROM campaigns WHERE id = (SELECT campaign_id FROM campaign_emails WHERE id = ?)').bind(ce.id).first() as any;
         await c.env.DB.prepare('INSERT INTO email_opens (tracking_id, source_type, source_id, user_email) VALUES (?,?,?,?)')
           .bind(trackingId, 'campaign_email', ce.id, campaign?.user_email || '').run();
@@ -2370,9 +2373,20 @@ app.get('/api/public/track/:trackingId/pixel.gif', async (c) => {
 });
 
 // ── Unsubscribe endpoint (NO auth required) ────────────────────────
+// GET shows confirmation page, POST processes the unsubscribe
 app.get('/api/public/unsubscribe/:trackingId', async (c) => {
   const trackingId = c.req.param('trackingId');
-  // Find the sender and recipient from the tracking ID
+  return c.html(`<html><body style="background:#08090a;color:#f7f8f8;font-family:Inter,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;text-align:center">
+    <div><h2>Unsubscribe</h2><p style="color:#8a8f98;margin-bottom:20px">Are you sure you want to unsubscribe from future emails?</p>
+    <form method="POST" action="/api/public/unsubscribe/${trackingId}">
+      <button type="submit" style="background:#ef4444;color:#fff;border:none;padding:10px 24px;border-radius:8px;font-size:14px;cursor:pointer;font-weight:600">Yes, unsubscribe me</button>
+    </form>
+    <p style="color:#6b7280;font-size:11px;margin-top:16px">You can close this page if you changed your mind.</p></div>
+  </body></html>`);
+});
+
+app.post('/api/public/unsubscribe/:trackingId', async (c) => {
+  const trackingId = c.req.param('trackingId');
   let senderEmail = '';
   let recipientEmail = '';
   const pm = await c.env.DB.prepare('SELECT user_email, sent_to FROM persona_messages WHERE tracking_id = ?').bind(trackingId).first() as any;
@@ -2385,7 +2399,6 @@ app.get('/api/public/unsubscribe/:trackingId', async (c) => {
   if (senderEmail && recipientEmail) {
     await c.env.DB.prepare('INSERT INTO unsubscribes (email_address, user_email, reason) VALUES (?,?,?) ON CONFLICT(email_address, user_email) DO NOTHING')
       .bind(recipientEmail.toLowerCase(), senderEmail, 'recipient_request').run();
-    // Also add to suppression list
     await c.env.DB.prepare('INSERT INTO email_suppression (email_address, reason, detail, user_email) VALUES (?,?,?,?) ON CONFLICT(email_address, user_email) DO UPDATE SET reason=excluded.reason')
       .bind(recipientEmail.toLowerCase(), 'unsubscribe', 'Unsubscribed via email link', senderEmail).run();
   }
@@ -2413,10 +2426,10 @@ app.get('/api/public/:token', async (c) => {
   ).bind(st.account_id).first();
   if (!account) return c.json({ error: 'Account not found' }, 404);
 
-  // Get research and messages
+  // Get research and messages — scoped to the share creator's data only
   const [research, messages] = await Promise.all([
-    c.env.DB.prepare('SELECT * FROM research_reports WHERE account_id = ? ORDER BY created_at DESC').bind(st.account_id).all(),
-    c.env.DB.prepare('SELECT * FROM persona_messages WHERE account_id = ? ORDER BY created_at DESC').bind(st.account_id).all(),
+    c.env.DB.prepare('SELECT * FROM research_reports WHERE account_id = ? AND user_email = ? ORDER BY created_at DESC').bind(st.account_id, st.created_by).all(),
+    c.env.DB.prepare('SELECT * FROM persona_messages WHERE account_id = ? AND user_email = ? ORDER BY created_at DESC').bind(st.account_id, st.created_by).all(),
   ]);
 
   // Strip raw_data to reduce payload
@@ -2431,13 +2444,21 @@ app.get('/api/public/:token', async (c) => {
   });
 });
 
-// Generate research on a shared account (public, no auth)
+// Generate research on a shared account (public, no auth — rate limited)
 app.post('/api/public/:token/research', async (c) => {
   const token = c.req.param('token');
   const { type } = await c.req.json<{ type: string }>();
 
   const st = await c.env.DB.prepare('SELECT * FROM share_tokens WHERE token = ?').bind(token).first();
   if (!st) return c.json({ error: 'Invalid share link' }, 404);
+
+  // Rate limit: max 5 research requests per share token per hour
+  const recentCount = await c.env.DB.prepare(
+    "SELECT COUNT(*) as cnt FROM research_reports WHERE account_id = ? AND user_email = ? AND created_at >= datetime('now', '-1 hour')"
+  ).bind(st.account_id, st.created_by).first() as any;
+  if ((recentCount?.cnt || 0) >= 5) {
+    return c.json({ error: 'Rate limit exceeded. Max 5 research requests per hour on shared links.' }, 429);
+  }
 
   const account = await c.env.DB.prepare('SELECT * FROM accounts WHERE id = ?').bind(st.account_id).first();
   if (!account) return c.json({ error: 'Account not found' }, 404);
@@ -2710,10 +2731,13 @@ app.get('/api/gmail/connect', async (c) => {
   if (!clientId) return c.json({ error: 'Google Client ID not configured. Use the Connect Gmail wizard to enter your credentials.' }, 500);
 
   const redirectUri = new URL('/api/gmail/callback', c.req.url).toString();
-  // CSRF-safe: hash the email with a nonce so it can't be spoofed
+  // CSRF-safe: HMAC-sign the state so it can't be forged
   const nonce = crypto.randomUUID().slice(0, 8);
-  const stateRaw = nonce + ':' + c.get('userEmail');
-  const state = btoa(stateRaw);
+  const statePayload = nonce + ':' + c.get('userEmail');
+  const hmacKey = await crypto.subtle.importKey('raw', new TextEncoder().encode(_encSecret || ENC_SALT), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const sig = await crypto.subtle.sign('HMAC', hmacKey, new TextEncoder().encode(statePayload));
+  const sigHex = Array.from(new Uint8Array(sig)).map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 16);
+  const state = btoa(statePayload + ':' + sigHex);
 
   const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?` +
     `client_id=${encodeURIComponent(clientId)}` +
@@ -2732,7 +2756,23 @@ app.get('/api/gmail/callback', async (c) => {
   const code = c.req.query('code');
   const stateParam = c.req.query('state') || '';
   let userEmail = c.get('userEmail');
-  try { const decoded = atob(stateParam); userEmail = decoded.split(':').slice(1).join(':'); } catch (e) { console.error('Operation failed:', e); }
+
+  // Verify HMAC-signed state to prevent CSRF
+  try {
+    const decoded = atob(stateParam);
+    const parts = decoded.split(':');
+    const receivedSig = parts.pop() || '';
+    const payload = parts.join(':'); // nonce:email
+    const hmacKey = await crypto.subtle.importKey('raw', new TextEncoder().encode(_encSecret || ENC_SALT), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+    const expectedSig = await crypto.subtle.sign('HMAC', hmacKey, new TextEncoder().encode(payload));
+    const expectedHex = Array.from(new Uint8Array(expectedSig)).map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 16);
+    if (receivedSig !== expectedHex) {
+      console.error('OAuth state HMAC mismatch — possible CSRF');
+      return c.html('<h2>Authorization failed</h2><p>Invalid state parameter. Please try connecting again.</p>');
+    }
+    userEmail = parts.slice(1).join(':'); // skip nonce, get email
+  } catch (e) { console.error('OAuth state verification failed:', e); }
+
   if (!code) return c.html('<h2>Authorization failed</h2><p>No code received.</p>');
 
   const { clientId, clientSecret } = await getGoogleCreds(c.env.DB, c.env);
@@ -2909,9 +2949,9 @@ function buildRawEmail(from: string, to: string, subject: string, bodyText: stri
     : '';
 
   const parts = [
-    `From: ${from}`,
-    `To: ${to}`,
-    `Subject: ${subject}`,
+    `From: ${sanitizeHeader(from)}`,
+    `To: ${sanitizeHeader(to)}`,
+    `Subject: ${sanitizeHeader(subject)}`,
     `MIME-Version: 1.0`,
     `Content-Type: multipart/alternative; boundary="${boundary}"`,
     '',
@@ -2936,6 +2976,11 @@ function buildRawEmail(from: string, to: string, subject: string, bodyText: stri
 function encodeRawEmail(rawEmail: string): string {
   return btoa(unescape(encodeURIComponent(rawEmail)))
     .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+// Sanitize email header values to prevent CRLF header injection
+function sanitizeHeader(value: string): string {
+  return value.replace(/[\r\n\0]/g, '').trim();
 }
 
 // Check if a recipient address is suppressed (bounced/unsubscribed)
@@ -3009,6 +3054,15 @@ app.post('/api/gmail/send', async (c) => {
   const stored = await c.env.DB.prepare('SELECT gmail_address FROM gmail_tokens WHERE user_email = ?').bind(email).first() as any;
   const from = stored?.gmail_address || email;
 
+  // Atomically reserve a daily-limit slot BEFORE sending (prevents race condition)
+  const reserved = await tryLogEmailSend(c.env.DB, email, to, subject, 'single');
+  if (!reserved) {
+    return c.json({
+      error: `Daily email limit reached (${DAILY_EMAIL_LIMIT} emails per day). This limit exists to protect your email domain reputation and prevent abuse flags.`,
+      code: 'DAILY_LIMIT_REACHED', dailyLimit: DAILY_EMAIL_LIMIT, sent: DAILY_EMAIL_LIMIT, remaining: 0,
+    }, 429 as any);
+  }
+
   // Generate tracking ID and build HTML email with signature + tracking + unsubscribe
   const trackingId = generateTrackingId();
   const baseUrl = new URL(c.req.url).origin;
@@ -3028,15 +3082,11 @@ app.post('/api/gmail/send', async (c) => {
   if (!sendRes.ok) {
     const err = await sendRes.json() as any;
     const errMsg = err.error?.message || 'Gmail send failed';
-    // Record bounce for permanent failures (invalid address, etc.)
     if (sendRes.status === 400 || sendRes.status === 404 || errMsg.includes('invalid') || errMsg.includes('not found')) {
       await recordBounce(c.env.DB, to, email, 'bounce', errMsg);
     }
     return c.json({ error: errMsg }, sendRes.status as any);
   }
-
-  // Log the successful send for daily limit tracking
-  await tryLogEmailSend(c.env.DB, email, to, subject, 'single');
 
   const result = await sendRes.json() as any;
 
@@ -4217,8 +4267,11 @@ app.post('/api/playbooks', async (c) => {
 });
 
 app.post('/api/playbooks/:id/use', async (c) => {
+  const email = c.get('userEmail');
+  // Verify ownership or shared playbook before incrementing
+  const pb = await c.env.DB.prepare('SELECT * FROM playbooks WHERE id = ?').bind(c.req.param('id')).first() as any;
+  if (!pb) return c.json({ error: 'Playbook not found' }, 404);
   await c.env.DB.prepare('UPDATE playbooks SET usage_count = usage_count + 1 WHERE id = ?').bind(c.req.param('id')).run();
-  const pb = await c.env.DB.prepare('SELECT * FROM playbooks WHERE id = ?').bind(c.req.param('id')).first();
   return c.json(pb);
 });
 
@@ -4268,8 +4321,9 @@ app.post('/api/voice-note', async (c) => {
   return c.json({ email: generatedEmail, transcript });
 });
 
-// ── Team Dashboard ─────────────────────────────────────────────────
+// ── Team Dashboard (admin only) ────────────────────────────────────
 app.get('/api/team-stats', async (c) => {
+  if (!isAdmin(c.get('userEmail'))) return c.json({ error: 'Admin access required' }, 403);
   const [users, emailsByUser, researchByUser, campaignsByUser, oppsByUser] = await Promise.all([
     c.env.DB.prepare('SELECT DISTINCT user_email FROM accounts WHERE user_email != ""').all(),
     c.env.DB.prepare('SELECT user_email, COUNT(*) as cnt FROM persona_messages GROUP BY user_email ORDER BY cnt DESC').all(),
@@ -4389,12 +4443,13 @@ app.post('/api/salesforce/push-activity', async (c) => {
 
 // Pull SF opportunities for an account
 app.get('/api/salesforce/opportunities/:accountName', async (c) => {
-  const sf = await c.env.DB.prepare('SELECT * FROM salesforce_tokens WHERE user_email = ?').bind(c.get('userEmail')).first() as any;
+  const sf = await c.env.DB.prepare('SELECT * FROM salesforce_tokens WHERE user_email = ?').bind(c.get('userEmail')).first() as SalesforceTokenRow | null;
   if (!sf) return c.json({ error: 'Salesforce not connected' }, 401);
+  const sfAccessToken = await decryptSFToken(sf);
   const name = c.req.param('accountName');
   const safeOppName = name.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/%/g, '\\%').replace(/_/g, '\\_');
   const res = await fetch(`${sf.instance_url}/services/data/v59.0/query?q=${encodeURIComponent(`SELECT Id,Name,Amount,StageName,CloseDate,Type FROM Opportunity WHERE Account.Name = '${safeOppName}'`)}`, {
-    headers: { 'Authorization': `Bearer ${sf.access_token}` },
+    headers: { 'Authorization': `Bearer ${sfAccessToken}` },
   });
   if (!res.ok) return c.json({ error: 'SF query failed' }, 500);
   const data = await res.json() as any;

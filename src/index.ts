@@ -2519,7 +2519,7 @@ app.delete('/api/scheduled-sends/:id', async (c) => {
 // GMAIL AGENT — OAuth + Send
 // ══════════════════════════════════════════════════════════════════
 
-const GMAIL_SCOPES = 'https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/userinfo.email';
+const GMAIL_SCOPES = 'https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.settings.basic https://www.googleapis.com/auth/userinfo.email';
 
 // ── Daily email send limit (per user) ──────────────────────────────
 const DAILY_EMAIL_LIMIT = 100;
@@ -2770,6 +2770,89 @@ async function refreshGmailToken(db: D1Database, userEmail: string, clientId: st
   return data.access_token;
 }
 
+// ── Gmail Signature + HTML Email Builder ────────────────────────────
+
+// Fetch the user's Gmail signature (HTML) from sendAs settings
+async function getGmailSignature(accessToken: string, sendAsEmail: string): Promise<string> {
+  try {
+    const res = await fetch(
+      `https://gmail.googleapis.com/gmail/v1/users/me/settings/sendAs/${encodeURIComponent(sendAsEmail)}`,
+      { headers: { 'Authorization': `Bearer ${accessToken}` } }
+    );
+    if (!res.ok) return '';
+    const data = await res.json() as { signature?: string };
+    return data.signature || '';
+  } catch (e) {
+    console.error('Failed to fetch Gmail signature:', e);
+    return '';
+  }
+}
+
+// Convert plain text body to HTML and append signature
+function buildHtmlBody(plainTextBody: string, signatureHtml: string): string {
+  // Escape HTML entities in the body text
+  const escaped = plainTextBody
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+  // Convert newlines to <br> for HTML rendering
+  const htmlBody = escaped.replace(/\n/g, '<br>');
+
+  const sigBlock = signatureHtml
+    ? `<br><br><div class="gmail_signature">${signatureHtml}</div>`
+    : '';
+
+  return `<html><body><div dir="ltr">${htmlBody}${sigBlock}</div></body></html>`;
+}
+
+// Build a complete RFC 2822 email with HTML body + signature
+function buildRawEmail(from: string, to: string, subject: string, bodyText: string, signatureHtml: string): string {
+  // Generate a MIME boundary
+  const boundary = '----=_RevFlare_' + Date.now().toString(36);
+
+  // Clean body text: strip any HTML tags, unescape entities
+  const cleanBody = bodyText
+    .replace(/<[^>]+>/g, '')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"');
+
+  const htmlContent = buildHtmlBody(cleanBody, signatureHtml);
+
+  // Multipart/alternative: plain text + HTML so email clients can pick
+  const parts = [
+    `From: ${from}`,
+    `To: ${to}`,
+    `Subject: ${subject}`,
+    `MIME-Version: 1.0`,
+    `Content-Type: multipart/alternative; boundary="${boundary}"`,
+    '',
+    `--${boundary}`,
+    'Content-Type: text/plain; charset=utf-8',
+    'Content-Transfer-Encoding: quoted-printable',
+    '',
+    cleanBody,
+    '',
+    `--${boundary}`,
+    'Content-Type: text/html; charset=utf-8',
+    'Content-Transfer-Encoding: quoted-printable',
+    '',
+    htmlContent,
+    '',
+    `--${boundary}--`,
+  ];
+
+  return parts.join('\r\n');
+}
+
+// Base64url encode a raw email string
+function encodeRawEmail(rawEmail: string): string {
+  return btoa(unescape(encodeURIComponent(rawEmail)))
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
 // Send email via Gmail API
 app.post('/api/gmail/send', async (c) => {
   const email = c.get('userEmail');
@@ -2808,19 +2891,10 @@ app.post('/api/gmail/send', async (c) => {
   const stored = await c.env.DB.prepare('SELECT gmail_address FROM gmail_tokens WHERE user_email = ?').bind(email).first() as any;
   const from = stored?.gmail_address || email;
 
-  // Build RFC 2822 email
-  const rawEmail = [
-    `From: ${from}`,
-    `To: ${to}`,
-    `Subject: ${subject}`,
-    `Content-Type: text/plain; charset=utf-8`,
-    '',
-    body.replace(/<[^>]+>/g, '').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"'),
-  ].join('\r\n');
-
-  // Base64url encode
-  const encoded = btoa(unescape(encodeURIComponent(rawEmail)))
-    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  // Fetch user's Gmail signature and build HTML email
+  const signature = await getGmailSignature(accessToken, from);
+  const rawEmail = buildRawEmail(from, to, subject, body, signature);
+  const encoded = encodeRawEmail(rawEmail);
 
   const sendRes = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
     method: 'POST',
@@ -2890,6 +2964,9 @@ app.post('/api/gmail/send-campaign/:campaignId', async (c) => {
   const stored = await c.env.DB.prepare('SELECT gmail_address FROM gmail_tokens WHERE user_email = ?').bind(email).first() as any;
   const from = stored?.gmail_address || email;
 
+  // Fetch signature once for the entire batch
+  const signature = await getGmailSignature(accessToken, from);
+
   const results: { id: number; status: string; error?: string }[] = [];
   let sentInThisBatch = 0;
 
@@ -2900,9 +2977,9 @@ app.post('/api/gmail/send-campaign/:campaignId', async (c) => {
     if (!em) { results.push({ id: eid, status: 'not_found' }); continue; }
     if (em.approval_status !== 'approved') { results.push({ id: eid, status: 'not_approved', error: 'Email not approved — only approved emails can be sent' }); continue; }
 
-    const bodyText = (em.content || '').replace(/^Subject:.*\n*/im, '').replace(/<[^>]+>/g, '').replace(/&amp;/g, '&');
-    const rawEmail = [`From: ${from}`, `To: ${toField}`, `Subject: ${em.subject}`, `Content-Type: text/plain; charset=utf-8`, '', bodyText].join('\r\n');
-    const encoded = btoa(unescape(encodeURIComponent(rawEmail))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    const bodyText = (em.content || '').replace(/^Subject:.*\n*/im, '');
+    const rawEmail = buildRawEmail(from, toField, em.subject || '', bodyText, signature);
+    const encoded = encodeRawEmail(rawEmail);
 
     try {
       const sendRes = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
@@ -4590,8 +4667,9 @@ const worker = {
           const stored = await env.DB.prepare('SELECT gmail_address FROM gmail_tokens WHERE user_email = ?').bind(send.user_email).first() as any;
           const from = stored?.gmail_address || send.user_email;
 
-          const rawEmail = [`From: ${from}`, `To: ${send.to_address}`, `Subject: ${send.subject}`, 'Content-Type: text/plain; charset=utf-8', '', send.body].join('\r\n');
-          const encoded = btoa(unescape(encodeURIComponent(rawEmail))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+          const signature = await getGmailSignature(accessToken, from);
+          const rawEmail = buildRawEmail(from, send.to_address, send.subject, send.body, signature);
+          const encoded = encodeRawEmail(rawEmail);
 
           const sendRes = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
             method: 'POST',

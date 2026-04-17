@@ -3,6 +3,7 @@ import { cors } from 'hono/cors';
 import puppeteer from '@cloudflare/puppeteer';
 import { fetchThreatIntelligence, matchIncidentsToAccount, matchIncidentsByName } from './threat-intel';
 import { calculateLeadScore, calculateROI, scoreSimilarity, buildMeetingPrepPrompt, SEQUENCE_TEMPLATES, buildWinLossPrompt } from './advanced-features';
+import { mcpInitialize, mcpListTools, mcpCallToolSafe, gatherMCPContext, type MCPTool } from './mcp-client';
 
 // ── Types ──────────────────────────────────────────────────────────
 type Bindings = {
@@ -1541,6 +1542,12 @@ app.post('/api/research/:accountId', async (c) => {
       ).join('\n')
     : '\nNo direct competitor products detected.';
 
+  // ── MCP Enrichment: gather data from connected MCP servers ─────
+  const mcpServers = await getUserMCPServers(c.env.DB, c.get('userEmail'));
+  const mcpResearchCtx = mcpServers.length > 0
+    ? await gatherMCPContext(mcpServers, 'forResearch', account)
+    : '';
+
   let system = '';
   let prompt = '';
   let title = '';
@@ -1578,6 +1585,9 @@ When the live data contradicts the CRM data (e.g., CDN provider differs), flag t
     default:
       return c.json({ error: 'Invalid research type' }, 400);
   }
+
+  // Append MCP enrichment data to the prompt if available
+  if (mcpResearchCtx) prompt += '\n' + mcpResearchCtx;
 
   const content = await runAI(c.env.AI, RESEARCH_MODEL, system, prompt);
 
@@ -1896,6 +1906,12 @@ CRITICAL RULES:
     ? `\nMISSING SECURITY HEADERS (verified via live HTTP probe): ${securityGaps.map(h => h.replace(': MISSING', '')).join(', ')}`
     : '';
 
+  // ── MCP Enrichment: gather data from connected MCP servers ─────
+  const mcpServers = await getUserMCPServers(c.env.DB, c.get('userEmail'));
+  const mcpContext = mcpServers.length > 0
+    ? await gatherMCPContext(mcpServers, 'forEmail', account)
+    : '';
+
   // Fetch primary contact for personalization
   const primaryContact = await c.env.DB.prepare(
     'SELECT first_name, last_name, title, email, role FROM contacts WHERE account_id = ? AND user_email = ? AND is_primary = 1 LIMIT 1'
@@ -1919,6 +1935,7 @@ ${secGapCtx}
 ${newsContext}
 ${resourcesCtx}
 ${customContext ? `\nADDITIONAL CONTEXT FROM REP:\n${customContext}` : ''}
+${mcpContext}
 
 ${isDisplacementMsg ? `THIS IS A DISPLACEMENT MESSAGE. The PRIMARY goal is to convince the recipient to replace their current vendors with Cloudflare. Structure as follows:
 
@@ -2408,6 +2425,117 @@ app.post('/api/public/unsubscribe/:trackingId', async (c) => {
   </body></html>`);
 });
 
+// ══════════════════════════════════════════════════════════════════
+// REVFLARE AS MCP SERVER — expose tools to external AI agents
+// ══════════════════════════════════════════════════════════════════
+
+const REVFLARE_MCP_TOOLS = [
+  { name: 'lookup_account', description: 'Look up a Cloudflare sales account by name or domain. Returns account details, IT spend, tech stack, and competitor products.', inputSchema: { type: 'object', properties: { query: { type: 'string', description: 'Account name or domain to search for' } }, required: ['query'] } },
+  { name: 'get_lead_score', description: 'Get the AI-computed lead score (0-100) for an account with scoring factors.', inputSchema: { type: 'object', properties: { account_name: { type: 'string' } }, required: ['account_name'] } },
+  { name: 'get_account_research', description: 'Get the latest AI research reports generated for an account.', inputSchema: { type: 'object', properties: { account_name: { type: 'string' } }, required: ['account_name'] } },
+  { name: 'get_pipeline', description: 'Get pipeline opportunities with ACV, stage, and notes.', inputSchema: { type: 'object', properties: { limit: { type: 'number', description: 'Max results (default 20)' } } } },
+  { name: 'get_alerts', description: 'Get recent infrastructure change and threat intelligence alerts.', inputSchema: { type: 'object', properties: { limit: { type: 'number', description: 'Max results (default 10)' } } } },
+  { name: 'get_email_stats', description: 'Get email outreach performance metrics: sent, opened, replied counts and rates.', inputSchema: { type: 'object', properties: {} } },
+];
+
+app.post('/api/mcp', async (c) => {
+  // This endpoint handles MCP JSON-RPC requests from external clients
+  const email = c.get('userEmail');
+  const body = await c.req.json() as any;
+
+  // Handle notifications (no response needed)
+  if (!body.id && body.method === 'notifications/initialized') {
+    return c.json({});
+  }
+
+  const id = body.id || 0;
+
+  switch (body.method) {
+    case 'initialize':
+      return c.json({ jsonrpc: '2.0', id, result: {
+        protocolVersion: '2025-03-26',
+        capabilities: { tools: {} },
+        serverInfo: { name: 'RevFlare', version: '1.0.0' },
+      }});
+
+    case 'tools/list':
+      return c.json({ jsonrpc: '2.0', id, result: { tools: REVFLARE_MCP_TOOLS } });
+
+    case 'tools/call': {
+      const { name, arguments: args } = body.params || {};
+      try {
+        let content: any[];
+
+        switch (name) {
+          case 'lookup_account': {
+            const q = (args?.query || '').toLowerCase();
+            const acc = await c.env.DB.prepare(
+              "SELECT * FROM accounts WHERE user_email = ? AND (LOWER(account_name) LIKE ? OR LOWER(website_domain) LIKE ?) LIMIT 3"
+            ).bind(email, `%${q}%`, `%${q}%`).all();
+            content = [{ type: 'text', text: JSON.stringify(acc.results.map((a: any) => ({
+              name: a.account_name, industry: a.industry, status: a.account_status, website: a.website,
+              it_spend: a.total_it_spend, cdn: a.cdn_primary, security: a.security_primary, employees: a.employees,
+            })), null, 2) }];
+            break;
+          }
+          case 'get_lead_score': {
+            const acc = await c.env.DB.prepare("SELECT * FROM accounts WHERE user_email = ? AND LOWER(account_name) LIKE ? LIMIT 1")
+              .bind(email, `%${(args?.account_name || '').toLowerCase()}%`).first();
+            if (!acc) { content = [{ type: 'text', text: 'Account not found' }]; break; }
+            const { score, factors } = calculateLeadScore(acc);
+            content = [{ type: 'text', text: `Lead Score: ${score}/100\nFactors:\n${factors.map((f: any) => `  - ${f.name}: +${f.points}`).join('\n')}` }];
+            break;
+          }
+          case 'get_account_research': {
+            const acc = await c.env.DB.prepare("SELECT id FROM accounts WHERE user_email = ? AND LOWER(account_name) LIKE ? LIMIT 1")
+              .bind(email, `%${(args?.account_name || '').toLowerCase()}%`).first() as any;
+            if (!acc) { content = [{ type: 'text', text: 'Account not found' }]; break; }
+            const reports = await c.env.DB.prepare("SELECT title, content, report_type, created_at FROM research_reports WHERE account_id = ? AND user_email = ? ORDER BY created_at DESC LIMIT 3")
+              .bind(acc.id, email).all();
+            content = [{ type: 'text', text: reports.results.length
+              ? (reports.results as any[]).map(r => `## ${r.title}\n${r.content?.slice(0, 2000)}`).join('\n\n---\n\n')
+              : 'No research reports found for this account.' }];
+            break;
+          }
+          case 'get_pipeline': {
+            const limit = Math.min(args?.limit || 20, 50);
+            const opps = await c.env.DB.prepare("SELECT account_name, industry, acv, stage, notes FROM opportunities WHERE user_email = ? ORDER BY acv DESC LIMIT ?")
+              .bind(email, limit).all();
+            content = [{ type: 'text', text: JSON.stringify(opps.results, null, 2) }];
+            break;
+          }
+          case 'get_alerts': {
+            const limit = Math.min(args?.limit || 10, 30);
+            const alerts = await c.env.DB.prepare("SELECT alert_type, title, detail, severity, created_at FROM alerts WHERE user_email = ? AND read = 0 ORDER BY created_at DESC LIMIT ?")
+              .bind(email, limit).all();
+            content = [{ type: 'text', text: JSON.stringify(alerts.results, null, 2) }];
+            break;
+          }
+          case 'get_email_stats': {
+            const [sent, opens, replies] = await Promise.all([
+              c.env.DB.prepare("SELECT COUNT(*) as cnt FROM email_send_log WHERE user_email = ?").bind(email).first() as Promise<any>,
+              c.env.DB.prepare("SELECT COUNT(DISTINCT source_id) as cnt FROM email_opens WHERE user_email = ?").bind(email).first() as Promise<any>,
+              c.env.DB.prepare("SELECT COUNT(*) as cnt FROM persona_messages WHERE user_email = ? AND replied = 1").bind(email).first() as Promise<any>,
+            ]);
+            const s = sent?.cnt || 0, o = opens?.cnt || 0, r = replies?.cnt || 0;
+            content = [{ type: 'text', text: `Sent: ${s}\nOpened: ${o} (${s > 0 ? Math.round(o/s*100) : 0}%)\nReplied: ${r} (${s > 0 ? Math.round(r/s*100) : 0}%)` }];
+            break;
+          }
+          default:
+            return c.json({ jsonrpc: '2.0', id, error: { code: -32601, message: `Unknown tool: ${name}` } });
+        }
+
+        return c.json({ jsonrpc: '2.0', id, result: { content } });
+      } catch (e: any) {
+        return c.json({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: 'Error: ' + e.message }], isError: true } });
+      }
+    }
+
+    default:
+      return c.json({ jsonrpc: '2.0', id, error: { code: -32601, message: `Method not found: ${body.method}` } });
+  }
+});
+
 // ── Public share data endpoint (NO auth required) ──────────────────
 app.get('/api/public/:token', async (c) => {
   const token = c.req.param('token');
@@ -2557,6 +2685,140 @@ app.post('/api/contacts/import/:accountId', async (c) => {
   }
 
   return c.json({ success: true, imported, total: contacts.length });
+});
+
+// ══════════════════════════════════════════════════════════════════
+// MCP SERVER MANAGEMENT
+// ══════════════════════════════════════════════════════════════════
+
+// Helper: get user's connected MCP servers for enrichment
+async function getUserMCPServers(db: D1Database, userEmail: string): Promise<Array<{ name: string; url: string; authToken?: string }>> {
+  const rows = await db.prepare(
+    'SELECT name, server_url, auth_token FROM mcp_servers WHERE user_email = ? AND enabled = 1'
+  ).bind(userEmail).all();
+  const servers: Array<{ name: string; url: string; authToken?: string }> = [];
+  for (const r of rows.results as any[]) {
+    let token = r.auth_token;
+    if (token) {
+      const decrypted = await decryptValue(token, 'mcp_token_' + userEmail + '_' + r.name);
+      if (decrypted) token = decrypted; // Fallback to raw if decrypt fails (legacy)
+    }
+    servers.push({ name: r.name, url: r.server_url, authToken: token || undefined });
+  }
+  return servers;
+}
+
+// List configured MCP servers
+app.get('/api/mcp/servers', async (c) => {
+  const email = c.get('userEmail');
+  const servers = await c.env.DB.prepare(
+    'SELECT id, name, display_name, server_url, server_type, enabled, tools_cache, tools_cached_at FROM mcp_servers WHERE user_email = ? ORDER BY display_name'
+  ).bind(email).all();
+  return c.json(servers.results.map((s: any) => ({
+    ...s,
+    tools: s.tools_cache ? JSON.parse(s.tools_cache) : [],
+    hasToken: !!s.auth_token,
+  })));
+});
+
+// Add/update an MCP server
+app.post('/api/mcp/servers', async (c) => {
+  const email = c.get('userEmail');
+  const { name, displayName, serverUrl, authToken, serverType } = await c.req.json<{
+    name: string; displayName: string; serverUrl: string; authToken?: string; serverType?: string;
+  }>();
+  if (!name || !serverUrl) return c.json({ error: 'name and serverUrl required' }, 400);
+
+  // Encrypt the auth token
+  const encToken = authToken ? await encryptValue(authToken, 'mcp_token_' + email + '_' + name) : null;
+
+  await c.env.DB.prepare(
+    `INSERT INTO mcp_servers (name, display_name, server_url, auth_token, server_type, user_email)
+     VALUES (?,?,?,?,?,?)
+     ON CONFLICT(name, user_email) DO UPDATE SET
+       display_name = excluded.display_name,
+       server_url = excluded.server_url,
+       auth_token = COALESCE(excluded.auth_token, mcp_servers.auth_token),
+       server_type = excluded.server_type`
+  ).bind(name, displayName || name, serverUrl, encToken, serverType || 'http', email).run();
+
+  return c.json({ success: true });
+});
+
+// Delete an MCP server
+app.delete('/api/mcp/servers/:id', async (c) => {
+  const email = c.get('userEmail');
+  await c.env.DB.prepare('DELETE FROM mcp_servers WHERE id = ? AND user_email = ?')
+    .bind(c.req.param('id'), email).run();
+  return c.json({ success: true });
+});
+
+// Toggle enable/disable
+app.post('/api/mcp/servers/:id/toggle', async (c) => {
+  const email = c.get('userEmail');
+  await c.env.DB.prepare(
+    'UPDATE mcp_servers SET enabled = CASE WHEN enabled = 1 THEN 0 ELSE 1 END WHERE id = ? AND user_email = ?'
+  ).bind(c.req.param('id'), email).run();
+  return c.json({ success: true });
+});
+
+// Discover tools on an MCP server (initialize + list tools)
+app.post('/api/mcp/servers/:id/discover', async (c) => {
+  const email = c.get('userEmail');
+  const server = await c.env.DB.prepare(
+    'SELECT * FROM mcp_servers WHERE id = ? AND user_email = ?'
+  ).bind(c.req.param('id'), email).first() as any;
+  if (!server) return c.json({ error: 'Server not found' }, 404);
+
+  let authToken = server.auth_token;
+  if (authToken) {
+    const decrypted = await decryptValue(authToken, 'mcp_token_' + email + '_' + server.name);
+    if (decrypted) authToken = decrypted;
+  }
+
+  const config = { url: server.server_url, authToken, name: server.name };
+
+  try {
+    await mcpInitialize(config);
+    const tools = await mcpListTools(config);
+
+    // Cache the tools
+    await c.env.DB.prepare(
+      'UPDATE mcp_servers SET tools_cache = ?, tools_cached_at = CURRENT_TIMESTAMP WHERE id = ?'
+    ).bind(JSON.stringify(tools), server.id).run();
+
+    return c.json({ success: true, tools, count: tools.length });
+  } catch (e: any) {
+    return c.json({ error: 'Failed to connect: ' + e.message, tools: [] }, 500);
+  }
+});
+
+// Call a specific tool on an MCP server
+app.post('/api/mcp/call', async (c) => {
+  const email = c.get('userEmail');
+  const { serverId, toolName, args } = await c.req.json<{ serverId: number; toolName: string; args?: any }>();
+
+  const server = await c.env.DB.prepare(
+    'SELECT * FROM mcp_servers WHERE id = ? AND user_email = ?'
+  ).bind(serverId, email).first() as any;
+  if (!server) return c.json({ error: 'Server not found' }, 404);
+
+  let authToken = server.auth_token;
+  if (authToken) {
+    const decrypted = await decryptValue(authToken, 'mcp_token_' + email + '_' + server.name);
+    if (decrypted) authToken = decrypted;
+  }
+
+  const config = { url: server.server_url, authToken, name: server.name };
+  const { text, error, durationMs } = await mcpCallToolSafe(config, toolName, args || {});
+
+  // Log the call
+  await c.env.DB.prepare(
+    'INSERT INTO mcp_tool_calls (mcp_server_id, tool_name, input_params, output_result, duration_ms, success, error, user_email) VALUES (?,?,?,?,?,?,?,?)'
+  ).bind(server.id, toolName, JSON.stringify(args || {}), text.slice(0, 10000), durationMs, error ? 0 : 1, error || null, email).run();
+
+  if (error) return c.json({ error, durationMs }, 500);
+  return c.json({ result: text, durationMs });
 });
 
 // ══════════════════════════════════════════════════════════════════

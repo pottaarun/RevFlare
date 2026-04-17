@@ -138,6 +138,7 @@ function navigate(){
   else if(h.startsWith('#/campaign/'))renderCampaignDetail(m,h.split('/')[2]);
   else if(h.startsWith('#/share/'))renderShareView(m,h.split('/')[2]);
   else if(h==='#/analytics')renderAnalytics(m);
+  else if(h==='#/email-stats')renderEmailStats(m);
   else if(h.startsWith('#/account/'))renderAccount(m,h.split('/')[2]);
   else renderDashboard(m);
 }
@@ -1246,6 +1247,7 @@ async function generateEmail(a, cache) {
   } else if (approvalStatus === 'rejected') {
     h += '<button class="btn btn-sm approval-approve-btn" id="approve-btn">Approve</button>';
   }
+  h += '<button class="btn btn-sm" style="background:var(--glass);color:var(--text-secondary);margin-left:8px" onclick="openEmailChat(' + messageId + ',\'persona_message\')">' + IC.send + ' Refine with AI</button>';
   h += '</div></div>';
 
   h += '<div class="email-toolbar"><div class="email-dot r"></div><div class="email-dot y"></div><div class="email-dot g"></div>';
@@ -1891,6 +1893,7 @@ function renderCampaignDetail(c, id) {
         var rejectLabel = eApproval === 'approved' ? 'Revoke' : 'Reject';
         h += '<button class="btn btn-sm approval-reject-btn camp-reject-btn" data-eid="' + e.id + '" style="padding:4px 10px;font-size:11px">' + rejectLabel + '</button>';
       }
+      h += '<button class="btn btn-sm" style="background:var(--glass);color:var(--text-secondary);padding:4px 10px;font-size:11px" onclick="openEmailChat(' + e.id + ',\'campaign_email\')">Refine with AI</button>';
       h += '</div>';
       h += '</div></div></div>';
 
@@ -3702,6 +3705,173 @@ function renderAnalytics(c) {
     c.innerHTML = '<div style="padding:32px;color:var(--red)">' + err.message + '</div>';
   });
 }
+
+// ── Email Performance Dashboard ────────────────────────────────────
+function renderEmailStats(c) {
+  c.innerHTML = '<div style="padding:32px"><h2 style="margin-bottom:20px">Email Performance</h2><div class="spinner" style="margin:20px auto"></div></div>';
+  api.get('/email-stats').then(function(d) {
+    var html = '<div style="padding:32px;max-width:900px;margin:0 auto">';
+    html += '<h2 style="margin-bottom:4px">Email Performance</h2>';
+    html += '<p style="color:var(--text-muted);font-size:12px;margin-bottom:24px">Track sent, opened, and replied metrics across all outreach.</p>';
+
+    // KPI cards
+    html += '<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:28px">';
+    html += '<div class="d-card" style="text-align:center"><div style="font-size:28px;font-weight:800;color:var(--blue)">' + d.totalSent + '</div><div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;font-weight:700">Total Sent</div></div>';
+    html += '<div class="d-card" style="text-align:center"><div style="font-size:28px;font-weight:800;color:var(--green)">' + d.totalOpened + '</div><div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;font-weight:700">Opened (' + d.openRate + '%)</div></div>';
+    html += '<div class="d-card" style="text-align:center"><div style="font-size:28px;font-weight:800;color:var(--purple)">' + d.totalReplied + '</div><div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;font-weight:700">Replied (' + d.replyRate + '%)</div></div>';
+    html += '<div class="d-card" style="text-align:center"><div style="font-size:28px;font-weight:800;color:var(--text-primary)">' + d.todaySent + '<span style="font-size:14px;color:var(--text-muted)">/' + d.dailyLimit + '</span></div><div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;font-weight:700">Today</div></div>';
+    html += '<div class="d-card" style="text-align:center"><div style="font-size:28px;font-weight:800;color:var(--red)">' + d.suppressedAddresses + '</div><div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;font-weight:700">Suppressed</div></div>';
+    html += '</div>';
+
+    // Daily trend chart
+    if (d.dailyTrend && d.dailyTrend.length) {
+      var maxSends = Math.max.apply(null, d.dailyTrend.map(function(t) { return t.sends; }));
+      html += '<div class="d-card" style="margin-bottom:20px"><h3 style="font-size:13px;margin-bottom:12px">Daily Send Volume (14 days)</h3>';
+      html += '<div style="display:flex;align-items:flex-end;gap:4px;height:100px">';
+      for (var i = 0; i < d.dailyTrend.length; i++) {
+        var t = d.dailyTrend[i];
+        var pct = maxSends > 0 ? (t.sends / maxSends * 100) : 0;
+        html += '<div style="flex:1;display:flex;flex-direction:column;align-items:center">';
+        html += '<div style="font-size:9px;color:var(--text-muted);margin-bottom:2px">' + t.sends + '</div>';
+        html += '<div style="width:100%;background:var(--blue);border-radius:3px 3px 0 0;height:' + Math.max(2, pct) + '%" title="' + t.day + ': ' + t.sends + ' sends"></div>';
+        html += '<div style="font-size:8px;color:var(--text-muted);margin-top:2px">' + t.day.slice(5) + '</div>';
+        html += '</div>';
+      }
+      html += '</div></div>';
+    }
+
+    // Campaign stats table
+    if (d.campaignStats && d.campaignStats.length) {
+      html += '<div class="d-card"><h3 style="font-size:13px;margin-bottom:12px">Campaign Performance</h3>';
+      html += '<table style="width:100%;font-size:12px"><thead><tr><th style="text-align:left">Campaign</th><th>Sent</th><th>Opened</th><th>Replied</th><th>Open Rate</th><th>Reply Rate</th></tr></thead><tbody>';
+      for (var j = 0; j < d.campaignStats.length; j++) {
+        var cs = d.campaignStats[j];
+        var or = cs.sent > 0 ? Math.round(cs.opened / cs.sent * 100) : 0;
+        var rr = cs.sent > 0 ? Math.round(cs.replied / cs.sent * 100) : 0;
+        html += '<tr>';
+        html += '<td style="font-weight:600">' + esc(cs.name || 'Campaign #' + cs.id) + ' <span style="font-size:10px;color:var(--text-muted)">' + esc(cs.theme || '') + '</span></td>';
+        html += '<td style="text-align:center">' + cs.sent + '</td>';
+        html += '<td style="text-align:center;color:var(--green)">' + cs.opened + '</td>';
+        html += '<td style="text-align:center;color:var(--purple)">' + cs.replied + '</td>';
+        html += '<td style="text-align:center">' + or + '%</td>';
+        html += '<td style="text-align:center">' + rr + '%</td>';
+        html += '</tr>';
+      }
+      html += '</tbody></table></div>';
+    }
+
+    html += '</div>';
+    c.innerHTML = html;
+  }).catch(function(err) {
+    c.innerHTML = '<div style="padding:32px;color:var(--red)">' + err.message + '</div>';
+  });
+}
+
+// ── AI Chat for Email Refinement ──────────────────────────────────
+window.openEmailChat = function(messageId, messageType) {
+  messageType = messageType || 'persona_message';
+  var existing = document.getElementById('email-chat-modal');
+  if (existing) existing.remove();
+
+  var modal = document.createElement('div');
+  modal.id = 'email-chat-modal';
+  modal.style.cssText = 'position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center';
+  modal.innerHTML = '<div style="background:var(--bg-card);border:1px solid var(--border-glass);border-radius:16px;width:560px;max-height:80vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,0.5)">'
+    + '<div style="padding:16px 20px;border-bottom:1px solid var(--border-glass);display:flex;justify-content:space-between;align-items:center">'
+    + '<div><strong style="font-size:14px">Refine Email with AI</strong><div style="font-size:11px;color:var(--text-muted)">Tell the AI how to modify this email</div></div>'
+    + '<button onclick="this.closest(\'#email-chat-modal\').remove()" style="background:none;border:none;color:var(--text-muted);font-size:20px;cursor:pointer">&times;</button>'
+    + '</div>'
+    + '<div id="chat-messages" style="flex:1;overflow-y:auto;padding:16px 20px;min-height:200px;max-height:50vh"></div>'
+    + '<div style="padding:12px 20px;border-top:1px solid var(--border-glass);display:flex;gap:8px">'
+    + '<input id="chat-input" type="text" placeholder="e.g. Make it shorter, Add more technical detail, Change CTA to a demo request..." style="flex:1;background:var(--glass);border:1px solid var(--border-glass);border-radius:8px;padding:8px 12px;font-size:12px;color:var(--text-primary);outline:none;font-family:inherit" />'
+    + '<button id="chat-send-btn" class="btn btn-primary" style="font-size:12px;white-space:nowrap" onclick="sendChatMessage(\'' + messageId + '\',\'' + messageType + '\')">Send</button>'
+    + '</div>'
+    + '<div style="padding:8px 20px 12px;display:flex;flex-wrap:wrap;gap:4px">'
+    + '<button class="btn btn-ghost btn-sm" style="font-size:10px" onclick="document.getElementById(\'chat-input\').value=\'Make it shorter and more concise\';sendChatMessage(\'' + messageId + '\',\'' + messageType + '\')">Shorter</button>'
+    + '<button class="btn btn-ghost btn-sm" style="font-size:10px" onclick="document.getElementById(\'chat-input\').value=\'Make the tone more casual and friendly\';sendChatMessage(\'' + messageId + '\',\'' + messageType + '\')">More casual</button>'
+    + '<button class="btn btn-ghost btn-sm" style="font-size:10px" onclick="document.getElementById(\'chat-input\').value=\'Add more specific technical details about Cloudflare products\';sendChatMessage(\'' + messageId + '\',\'' + messageType + '\')">More technical</button>'
+    + '<button class="btn btn-ghost btn-sm" style="font-size:10px" onclick="document.getElementById(\'chat-input\').value=\'Change the CTA to suggest a 15-minute demo call\';sendChatMessage(\'' + messageId + '\',\'' + messageType + '\')">Demo CTA</button>'
+    + '<button class="btn btn-ghost btn-sm" style="font-size:10px" onclick="document.getElementById(\'chat-input\').value=\'Add urgency and a stronger cost-of-inaction argument\';sendChatMessage(\'' + messageId + '\',\'' + messageType + '\')">More urgent</button>'
+    + '</div></div>';
+  document.body.appendChild(modal);
+  modal.addEventListener('click', function(e) { if (e.target === modal) modal.remove(); });
+  document.getElementById('chat-input').addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') sendChatMessage(messageId, messageType);
+  });
+
+  // Load chat history
+  var chatMsgs = document.getElementById('chat-messages');
+  chatMsgs.innerHTML = '<div style="color:var(--text-muted);font-size:12px;text-align:center;padding:20px">Loading chat history...</div>';
+  api.get('/chat/history/' + messageId + '?type=' + messageType).then(function(history) {
+    if (!history.length) {
+      chatMsgs.innerHTML = '<div style="color:var(--text-muted);font-size:12px;text-align:center;padding:20px">No previous edits. Tell the AI what to change.</div>';
+    } else {
+      chatMsgs.innerHTML = '';
+      for (var i = 0; i < history.length; i++) {
+        appendChatBubble(history[i].role, history[i].content);
+      }
+    }
+  });
+};
+
+function appendChatBubble(role, content) {
+  var chatMsgs = document.getElementById('chat-messages');
+  if (!chatMsgs) return;
+  var bubble = document.createElement('div');
+  bubble.style.cssText = 'margin-bottom:12px;display:flex;' + (role === 'user' ? 'justify-content:flex-end' : 'justify-content:flex-start');
+  var inner = document.createElement('div');
+  inner.style.cssText = 'max-width:85%;padding:8px 12px;border-radius:12px;font-size:12px;line-height:1.5;white-space:pre-wrap;'
+    + (role === 'user' ? 'background:var(--blue);color:#fff;border-bottom-right-radius:4px' : 'background:var(--glass);color:var(--text-primary);border-bottom-left-radius:4px');
+  inner.textContent = content.length > 500 ? content.slice(0, 500) + '...' : content;
+  bubble.appendChild(inner);
+  chatMsgs.appendChild(bubble);
+  chatMsgs.scrollTop = chatMsgs.scrollHeight;
+}
+
+window.sendChatMessage = function(messageId, messageType) {
+  var input = document.getElementById('chat-input');
+  var btn = document.getElementById('chat-send-btn');
+  var instruction = input.value.trim();
+  if (!instruction) return;
+
+  appendChatBubble('user', instruction);
+  input.value = '';
+  btn.disabled = true;
+  btn.textContent = 'Thinking...';
+
+  // Show typing indicator
+  var typing = document.createElement('div');
+  typing.id = 'chat-typing';
+  typing.style.cssText = 'margin-bottom:12px;display:flex;justify-content:flex-start';
+  typing.innerHTML = '<div style="background:var(--glass);padding:8px 12px;border-radius:12px;font-size:12px;color:var(--text-muted)"><div class="spinner" style="width:16px;height:16px;margin:0"></div></div>';
+  document.getElementById('chat-messages').appendChild(typing);
+
+  fetch('/api/chat/message/' + messageId, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ instruction: instruction, messageType: messageType })
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    var t = document.getElementById('chat-typing');
+    if (t) t.remove();
+    btn.disabled = false;
+    btn.textContent = 'Send';
+
+    if (d.success) {
+      appendChatBubble('assistant', d.content);
+      toast('Email updated! Review the changes and re-approve if needed.', 'success');
+      // Refresh the page content if possible
+      if (typeof navigate === 'function') setTimeout(navigate, 500);
+    } else {
+      appendChatBubble('assistant', 'Error: ' + (d.error || 'Failed to update email'));
+    }
+  }).catch(function(e) {
+    var t = document.getElementById('chat-typing');
+    if (t) t.remove();
+    btn.disabled = false;
+    btn.textContent = 'Send';
+    appendChatBubble('assistant', 'Error: ' + e.message);
+  });
+};
 
 // ── Copy Utility ───────────────────────────────────────────────────
 window.copyEl=function(btn,mode){

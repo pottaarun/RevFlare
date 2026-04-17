@@ -1896,6 +1896,14 @@ CRITICAL RULES:
     ? `\nMISSING SECURITY HEADERS (verified via live HTTP probe): ${securityGaps.map(h => h.replace(': MISSING', '')).join(', ')}`
     : '';
 
+  // Fetch primary contact for personalization
+  const primaryContact = await c.env.DB.prepare(
+    'SELECT first_name, last_name, title, email, role FROM contacts WHERE account_id = ? AND user_email = ? AND is_primary = 1 LIMIT 1'
+  ).bind(accountId, c.get('userEmail')).first() as any;
+  const contactCtx = primaryContact
+    ? `\nRECIPIENT CONTACT:\n- Name: ${primaryContact.first_name} ${primaryContact.last_name}\n- Title: ${primaryContact.title || 'N/A'}\n- Email: ${primaryContact.email}\n- Role: ${primaryContact.role || 'N/A'}\nADDRESS THE EMAIL TO THIS PERSON BY NAME. Use their first name in the greeting (e.g., "Hi ${primaryContact.first_name},").`
+    : '';
+
   const prompt = `Generate a ${msgTypeLabel} for this account:
 
 CRM DATA:
@@ -1903,6 +1911,7 @@ ${ctx}
 ${competitorCtx}
 ${costOfInactionCtx}
 ${displacementCtx}
+${contactCtx}
 ${websiteQuote}
 ${verifiedInfra}
 ${verifiedDNS}
@@ -2329,6 +2338,61 @@ app.delete('/api/share/token/:token', async (c) => {
   const email = c.get('userEmail');
   await c.env.DB.prepare('DELETE FROM share_tokens WHERE token = ? AND created_by = ?').bind(token, email).run();
   return c.json({ success: true });
+});
+
+// ── Open tracking pixel (NO auth required) ────────────────────────
+// Returns a 1x1 transparent GIF and records the open
+const TRACKING_PIXEL = Uint8Array.from(atob('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7'), c => c.charCodeAt(0));
+
+app.get('/api/public/track/:trackingId/pixel.gif', async (c) => {
+  const trackingId = c.req.param('trackingId');
+  // Fire-and-forget: record the open without blocking the response
+  c.executionCtx.waitUntil((async () => {
+    try {
+      // Find which message this tracking ID belongs to
+      const pm = await c.env.DB.prepare('SELECT id, user_email FROM persona_messages WHERE tracking_id = ?').bind(trackingId).first() as any;
+      if (pm) {
+        await c.env.DB.prepare('UPDATE persona_messages SET open_count = open_count + 1 WHERE id = ?').bind(pm.id).run();
+        await c.env.DB.prepare('INSERT INTO email_opens (tracking_id, source_type, source_id, user_email) VALUES (?,?,?,?)')
+          .bind(trackingId, 'persona_message', pm.id, pm.user_email).run();
+        return;
+      }
+      const ce = await c.env.DB.prepare('SELECT id FROM campaign_emails WHERE tracking_id = ?').bind(trackingId).first() as any;
+      if (ce) {
+        await c.env.DB.prepare('UPDATE campaign_emails SET open_count = open_count + 1 WHERE id = ?').bind(ce.id).run();
+        const campaign = await c.env.DB.prepare('SELECT user_email FROM campaigns WHERE id = (SELECT campaign_id FROM campaign_emails WHERE id = ?)').bind(ce.id).first() as any;
+        await c.env.DB.prepare('INSERT INTO email_opens (tracking_id, source_type, source_id, user_email) VALUES (?,?,?,?)')
+          .bind(trackingId, 'campaign_email', ce.id, campaign?.user_email || '').run();
+      }
+    } catch (e) { console.error('Open tracking error:', e); }
+  })());
+  return new Response(TRACKING_PIXEL, { headers: { 'Content-Type': 'image/gif', 'Cache-Control': 'no-store, no-cache' } });
+});
+
+// ── Unsubscribe endpoint (NO auth required) ────────────────────────
+app.get('/api/public/unsubscribe/:trackingId', async (c) => {
+  const trackingId = c.req.param('trackingId');
+  // Find the sender and recipient from the tracking ID
+  let senderEmail = '';
+  let recipientEmail = '';
+  const pm = await c.env.DB.prepare('SELECT user_email, sent_to FROM persona_messages WHERE tracking_id = ?').bind(trackingId).first() as any;
+  if (pm) { senderEmail = pm.user_email; recipientEmail = pm.sent_to || ''; }
+  else {
+    const ce = await c.env.DB.prepare('SELECT ce.sent_to, c.user_email FROM campaign_emails ce JOIN campaigns c ON ce.campaign_id = c.id WHERE ce.tracking_id = ?').bind(trackingId).first() as any;
+    if (ce) { senderEmail = ce.user_email; recipientEmail = ce.sent_to || ''; }
+  }
+
+  if (senderEmail && recipientEmail) {
+    await c.env.DB.prepare('INSERT INTO unsubscribes (email_address, user_email, reason) VALUES (?,?,?) ON CONFLICT(email_address, user_email) DO NOTHING')
+      .bind(recipientEmail.toLowerCase(), senderEmail, 'recipient_request').run();
+    // Also add to suppression list
+    await c.env.DB.prepare('INSERT INTO email_suppression (email_address, reason, detail, user_email) VALUES (?,?,?,?) ON CONFLICT(email_address, user_email) DO UPDATE SET reason=excluded.reason')
+      .bind(recipientEmail.toLowerCase(), 'unsubscribe', 'Unsubscribed via email link', senderEmail).run();
+  }
+
+  return c.html(`<html><body style="background:#08090a;color:#f7f8f8;font-family:Inter,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;text-align:center">
+    <div><h2 style="color:#34d399">You've been unsubscribed</h2><p style="color:#8a8f98">You will no longer receive emails from this sender.</p></div>
+  </body></html>`);
 });
 
 // ── Public share data endpoint (NO auth required) ──────────────────
@@ -2789,7 +2853,14 @@ async function getGmailSignature(accessToken: string, sendAsEmail: string): Prom
 }
 
 // Convert plain text body to HTML and append signature
-function buildHtmlBody(plainTextBody: string, signatureHtml: string): string {
+// Options for building emails with tracking and compliance features
+interface EmailBuildOptions {
+  trackingId?: string;       // Unique ID for open tracking pixel
+  baseUrl?: string;          // Worker URL for tracking/unsubscribe endpoints
+  senderEmail?: string;      // RevFlare user email (for unsubscribe routing)
+}
+
+function buildHtmlBody(plainTextBody: string, signatureHtml: string, opts?: EmailBuildOptions): string {
   // Escape HTML entities in the body text
   const escaped = plainTextBody
     .replace(/&/g, '&amp;')
@@ -2803,12 +2874,23 @@ function buildHtmlBody(plainTextBody: string, signatureHtml: string): string {
     ? `<br><br><div class="gmail_signature">${signatureHtml}</div>`
     : '';
 
-  return `<html><body><div dir="ltr">${htmlBody}${sigBlock}</div></body></html>`;
+  // Open tracking pixel (1x1 transparent GIF loaded from our endpoint)
+  const trackingPixel = opts?.trackingId && opts?.baseUrl
+    ? `<img src="${opts.baseUrl}/api/public/track/${opts.trackingId}/pixel.gif" width="1" height="1" style="display:none" alt="" />`
+    : '';
+
+  // CAN-SPAM compliant unsubscribe footer
+  const unsubLink = opts?.trackingId && opts?.baseUrl
+    ? `<br><div style="margin-top:24px;padding-top:12px;border-top:1px solid #e5e7eb;font-size:11px;color:#9ca3af;line-height:1.5">`
+      + `Sent via RevFlare on behalf of ${opts.senderEmail || 'the sender'}. `
+      + `<a href="${opts.baseUrl}/api/public/unsubscribe/${opts.trackingId}" style="color:#6b7280;text-decoration:underline">Unsubscribe</a> from future emails.</div>`
+    : '';
+
+  return `<html><body><div dir="ltr">${htmlBody}${sigBlock}${unsubLink}${trackingPixel}</div></body></html>`;
 }
 
-// Build a complete RFC 2822 email with HTML body + signature
-function buildRawEmail(from: string, to: string, subject: string, bodyText: string, signatureHtml: string): string {
-  // Generate a MIME boundary
+// Build a complete RFC 2822 email with HTML body + signature + tracking
+function buildRawEmail(from: string, to: string, subject: string, bodyText: string, signatureHtml: string, opts?: EmailBuildOptions): string {
   const boundary = '----=_RevFlare_' + Date.now().toString(36);
 
   // Clean body text: strip any HTML tags, unescape entities
@@ -2819,9 +2901,13 @@ function buildRawEmail(from: string, to: string, subject: string, bodyText: stri
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"');
 
-  const htmlContent = buildHtmlBody(cleanBody, signatureHtml);
+  const htmlContent = buildHtmlBody(cleanBody, signatureHtml, opts);
 
-  // Multipart/alternative: plain text + HTML so email clients can pick
+  // Plain text footer for CAN-SPAM
+  const plainFooter = opts?.trackingId && opts?.baseUrl
+    ? `\n\n---\nTo unsubscribe: ${opts.baseUrl}/api/public/unsubscribe/${opts.trackingId}`
+    : '';
+
   const parts = [
     `From: ${from}`,
     `To: ${to}`,
@@ -2833,7 +2919,7 @@ function buildRawEmail(from: string, to: string, subject: string, bodyText: stri
     'Content-Type: text/plain; charset=utf-8',
     'Content-Transfer-Encoding: quoted-printable',
     '',
-    cleanBody,
+    cleanBody + plainFooter,
     '',
     `--${boundary}`,
     'Content-Type: text/html; charset=utf-8',
@@ -2847,10 +2933,36 @@ function buildRawEmail(from: string, to: string, subject: string, bodyText: stri
   return parts.join('\r\n');
 }
 
-// Base64url encode a raw email string
 function encodeRawEmail(rawEmail: string): string {
   return btoa(unescape(encodeURIComponent(rawEmail)))
     .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+// Check if a recipient address is suppressed (bounced/unsubscribed)
+async function isAddressSuppressed(db: D1Database, recipientEmail: string, senderEmail: string): Promise<{ suppressed: boolean; reason?: string }> {
+  const suppression = await db.prepare(
+    'SELECT reason FROM email_suppression WHERE email_address = ? AND user_email = ?'
+  ).bind(recipientEmail.toLowerCase(), senderEmail).first() as any;
+  if (suppression) return { suppressed: true, reason: suppression.reason };
+
+  const unsub = await db.prepare(
+    'SELECT id FROM unsubscribes WHERE email_address = ? AND user_email = ?'
+  ).bind(recipientEmail.toLowerCase(), senderEmail).first();
+  if (unsub) return { suppressed: true, reason: 'unsubscribed' };
+
+  return { suppressed: false };
+}
+
+// Record a bounce/failure for suppression
+async function recordBounce(db: D1Database, recipientEmail: string, senderEmail: string, reason: string, detail?: string): Promise<void> {
+  await db.prepare(
+    'INSERT INTO email_suppression (email_address, reason, detail, user_email) VALUES (?,?,?,?) ON CONFLICT(email_address, user_email) DO UPDATE SET reason=excluded.reason, detail=excluded.detail'
+  ).bind(recipientEmail.toLowerCase(), reason, detail || null, senderEmail).run();
+}
+
+// Generate a unique tracking ID for an email
+function generateTrackingId(): string {
+  return crypto.randomUUID().replace(/-/g, '');
 }
 
 // Send email via Gmail API
@@ -2859,6 +2971,12 @@ app.post('/api/gmail/send', async (c) => {
   const { to, subject, body, accountId, messageId } = await c.req.json<{ to: string; subject: string; body: string; accountId?: number; messageId?: number }>();
 
   if (!to || !subject || !body) return c.json({ error: 'Missing to, subject, or body' }, 400);
+
+  // ── Suppression check ────────────────────────────────────────────
+  const suppCheck = await isAddressSuppressed(c.env.DB, to, email);
+  if (suppCheck.suppressed) {
+    return c.json({ error: `Cannot send to ${to}: address is ${suppCheck.reason}. Remove from suppression list to re-enable.`, code: 'ADDRESS_SUPPRESSED' }, 400);
+  }
 
   // ── Daily email limit check ──────────────────────────────────────
   const dailySent = await getDailyEmailCount(c.env.DB, email);
@@ -2891,9 +3009,11 @@ app.post('/api/gmail/send', async (c) => {
   const stored = await c.env.DB.prepare('SELECT gmail_address FROM gmail_tokens WHERE user_email = ?').bind(email).first() as any;
   const from = stored?.gmail_address || email;
 
-  // Fetch user's Gmail signature and build HTML email
+  // Generate tracking ID and build HTML email with signature + tracking + unsubscribe
+  const trackingId = generateTrackingId();
+  const baseUrl = new URL(c.req.url).origin;
   const signature = await getGmailSignature(accessToken, from);
-  const rawEmail = buildRawEmail(from, to, subject, body, signature);
+  const rawEmail = buildRawEmail(from, to, subject, body, signature, { trackingId, baseUrl, senderEmail: email });
   const encoded = encodeRawEmail(rawEmail);
 
   const sendRes = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
@@ -2907,7 +3027,12 @@ app.post('/api/gmail/send', async (c) => {
 
   if (!sendRes.ok) {
     const err = await sendRes.json() as any;
-    return c.json({ error: err.error?.message || 'Gmail send failed' }, sendRes.status as any);
+    const errMsg = err.error?.message || 'Gmail send failed';
+    // Record bounce for permanent failures (invalid address, etc.)
+    if (sendRes.status === 400 || sendRes.status === 404 || errMsg.includes('invalid') || errMsg.includes('not found')) {
+      await recordBounce(c.env.DB, to, email, 'bounce', errMsg);
+    }
+    return c.json({ error: errMsg }, sendRes.status as any);
   }
 
   // Log the successful send for daily limit tracking
@@ -2915,11 +3040,11 @@ app.post('/api/gmail/send', async (c) => {
 
   const result = await sendRes.json() as any;
 
-  // Track thread/message IDs for reply detection
-  if (messageId && result.threadId) {
+  // Track thread/message IDs + tracking ID for reply/open detection
+  if (messageId) {
     await c.env.DB.prepare(
-      'UPDATE persona_messages SET gmail_thread_id = ?, gmail_message_id = ?, sent_to = ?, sent_at = CURRENT_TIMESTAMP WHERE id = ? AND user_email = ?'
-    ).bind(result.threadId, result.id, to, messageId, email).run();
+      'UPDATE persona_messages SET gmail_thread_id = ?, gmail_message_id = ?, sent_to = ?, sent_at = CURRENT_TIMESTAMP, tracking_id = ? WHERE id = ? AND user_email = ?'
+    ).bind(result.threadId || null, result.id, to, trackingId, messageId, email).run();
   }
 
   const newDailySent = dailySent + 1;
@@ -2971,14 +3096,28 @@ app.post('/api/gmail/send-campaign/:campaignId', async (c) => {
   let sentInThisBatch = 0;
 
   // Cap batch to both the 10-per-call limit AND remaining daily allowance
+  const baseUrl = new URL(c.req.url).origin;
   const batchLimit = Math.min(10, remaining);
   for (const eid of emailIds.slice(0, batchLimit)) {
     const em = await c.env.DB.prepare('SELECT * FROM campaign_emails WHERE id = ? AND campaign_id = ?').bind(eid, campaignId).first() as any;
     if (!em) { results.push({ id: eid, status: 'not_found' }); continue; }
     if (em.approval_status !== 'approved') { results.push({ id: eid, status: 'not_approved', error: 'Email not approved — only approved emails can be sent' }); continue; }
 
+    // Determine recipient: use account's primary contact if no toField, else toField
+    let recipient = toField;
+    if (!recipient && em.account_id) {
+      const contact = await c.env.DB.prepare('SELECT email FROM contacts WHERE account_id = ? AND user_email = ? AND is_primary = 1 LIMIT 1').bind(em.account_id, email).first() as any;
+      if (contact?.email) recipient = contact.email;
+    }
+    if (!recipient) { results.push({ id: eid, status: 'skipped', error: 'No recipient — add a primary contact for this account' }); continue; }
+
+    // Suppression check per recipient
+    const suppCheck = await isAddressSuppressed(c.env.DB, recipient, email);
+    if (suppCheck.suppressed) { results.push({ id: eid, status: 'suppressed', error: `${recipient} is ${suppCheck.reason}` }); continue; }
+
+    const trackingId = generateTrackingId();
     const bodyText = (em.content || '').replace(/^Subject:.*\n*/im, '');
-    const rawEmail = buildRawEmail(from, toField, em.subject || '', bodyText, signature);
+    const rawEmail = buildRawEmail(from, recipient, em.subject || '', bodyText, signature, { trackingId, baseUrl, senderEmail: email });
     const encoded = encodeRawEmail(rawEmail);
 
     try {
@@ -2988,13 +3127,17 @@ app.post('/api/gmail/send-campaign/:campaignId', async (c) => {
         body: JSON.stringify({ raw: encoded }),
       });
       if (sendRes.ok) {
-        await c.env.DB.prepare('UPDATE campaign_emails SET status = ? WHERE id = ?').bind('sent', eid).run();
-        await tryLogEmailSend(c.env.DB, email, toField, em.subject || '', 'campaign');
+        const sendResult = await sendRes.json() as any;
+        await c.env.DB.prepare('UPDATE campaign_emails SET status = ?, tracking_id = ?, sent_to = ?, gmail_thread_id = ?, gmail_message_id = ? WHERE id = ?')
+          .bind('sent', trackingId, recipient, sendResult.threadId || null, sendResult.id || null, eid).run();
+        await tryLogEmailSend(c.env.DB, email, recipient, em.subject || '', 'campaign');
         sentInThisBatch++;
         results.push({ id: eid, status: 'sent' });
       } else {
         const err = await sendRes.json() as any;
-        results.push({ id: eid, status: 'error', error: err.error?.message });
+        const errMsg = err.error?.message || 'Send failed';
+        if (sendRes.status === 400 || sendRes.status === 404) await recordBounce(c.env.DB, recipient, email, 'bounce', errMsg);
+        results.push({ id: eid, status: 'error', error: errMsg });
       }
     } catch (e: any) {
       results.push({ id: eid, status: 'error', error: e.message });
@@ -3838,6 +3981,34 @@ app.get('/api/sequences', async (c) => {
   return c.json(seqs.results.map((s: any) => ({ ...s, touches: JSON.parse(s.touches || '[]') })));
 });
 
+// Activate a sequence: set recipient and start auto-execution
+app.post('/api/sequences/:id/activate', async (c) => {
+  const email = c.get('userEmail');
+  const id = c.req.param('id');
+  const { toAddress } = await c.req.json<{ toAddress: string }>();
+  if (!toAddress) return c.json({ error: 'toAddress is required' }, 400);
+
+  const seq = await c.env.DB.prepare('SELECT * FROM sequences WHERE id = ? AND user_email = ?').bind(id, email).first() as any;
+  if (!seq) return c.json({ error: 'Sequence not found' }, 404);
+
+  const touches = JSON.parse(seq.touches || '[]');
+  const firstTouchDay = touches[0]?.day || 0;
+
+  await c.env.DB.prepare(
+    `UPDATE sequences SET status = 'active', to_address = ?, current_touch = 0, next_send_at = datetime('now', '+${firstTouchDay} days') WHERE id = ? AND user_email = ?`
+  ).bind(toAddress, id, email).run();
+
+  return c.json({ success: true, status: 'active', nextSendAt: new Date(Date.now() + firstTouchDay * 86400000).toISOString() });
+});
+
+// Pause/cancel a sequence
+app.post('/api/sequences/:id/pause', async (c) => {
+  const email = c.get('userEmail');
+  await c.env.DB.prepare("UPDATE sequences SET status = 'paused', next_send_at = NULL WHERE id = ? AND user_email = ?")
+    .bind(c.req.param('id'), email).run();
+  return c.json({ success: true });
+});
+
 // ── Change Detection ───────────────────────────────────────────────
 app.post('/api/detect-changes/:accountId', async (c) => {
   const account = await c.env.DB.prepare('SELECT * FROM accounts WHERE id = ? AND user_email = ?').bind(c.req.param('accountId'), c.get('userEmail')).first();
@@ -4228,6 +4399,195 @@ app.get('/api/salesforce/opportunities/:accountName', async (c) => {
   if (!res.ok) return c.json({ error: 'SF query failed' }, 500);
   const data = await res.json() as any;
   return c.json(data.records || []);
+});
+
+// Pull contacts from Salesforce for an account
+app.post('/api/salesforce/import-contacts/:accountId', async (c) => {
+  const email = c.get('userEmail');
+  const accountId = c.req.param('accountId');
+  const account = await c.env.DB.prepare('SELECT id, account_name FROM accounts WHERE id = ? AND user_email = ?').bind(accountId, email).first() as any;
+  if (!account) return c.json({ error: 'Account not found' }, 404);
+
+  const sf = await c.env.DB.prepare('SELECT * FROM salesforce_tokens WHERE user_email = ?').bind(email).first() as SalesforceTokenRow | null;
+  if (!sf) return c.json({ error: 'Salesforce not connected' }, 401);
+  const sfAccessToken = await decryptSFToken(sf);
+
+  // Find the SF Account by name, then pull its Contacts
+  const safeName = account.account_name.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/%/g, '\\%').replace(/_/g, '\\_');
+  const searchRes = await fetch(
+    `${sf.instance_url}/services/data/v59.0/query?q=${encodeURIComponent(`SELECT Id, FirstName, LastName, Email, Title, Phone FROM Contact WHERE Account.Name = '${safeName}' AND Email != null LIMIT 50`)}`,
+    { headers: { 'Authorization': `Bearer ${sfAccessToken}` } }
+  );
+  if (!searchRes.ok) return c.json({ error: 'Salesforce query failed', detail: await searchRes.text() }, 500);
+  const data = await searchRes.json() as any;
+  const sfContacts = data.records || [];
+
+  let imported = 0;
+  for (const ct of sfContacts) {
+    if (!ct.Email) continue;
+    try {
+      await c.env.DB.prepare(
+        'INSERT INTO contacts (account_id, first_name, last_name, email, title, phone, salesforce_id, user_email) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING'
+      ).bind(accountId, ct.FirstName || '', ct.LastName || '', ct.Email, ct.Title || null, ct.Phone || null, ct.Id || null, email).run();
+      imported++;
+    } catch (e) { console.error('SF contact import failed:', e); }
+  }
+
+  return c.json({ success: true, imported, total: sfContacts.length });
+});
+
+// ══════════════════════════════════════════════════════════════════
+// EMAIL PERFORMANCE STATS
+// ══════════════════════════════════════════════════════════════════
+
+app.get('/api/email-stats', async (c) => {
+  const email = c.get('userEmail');
+
+  const [sent, opens, replies, campaigns, suppressions] = await Promise.all([
+    c.env.DB.prepare("SELECT COUNT(*) as cnt FROM email_send_log WHERE user_email = ?").bind(email).first() as Promise<any>,
+    c.env.DB.prepare("SELECT COUNT(DISTINCT source_id) as cnt FROM email_opens WHERE user_email = ?").bind(email).first() as Promise<any>,
+    c.env.DB.prepare("SELECT COUNT(*) as cnt FROM persona_messages WHERE user_email = ? AND replied = 1").bind(email).first() as Promise<any>,
+    c.env.DB.prepare(`SELECT c.id, c.name, c.theme,
+      (SELECT COUNT(*) FROM campaign_emails ce WHERE ce.campaign_id = c.id AND ce.status = 'sent') as sent,
+      (SELECT COUNT(*) FROM campaign_emails ce WHERE ce.campaign_id = c.id AND ce.open_count > 0) as opened,
+      (SELECT COUNT(*) FROM campaign_emails ce WHERE ce.campaign_id = c.id AND ce.replied = 1) as replied
+      FROM campaigns c WHERE c.user_email = ? ORDER BY c.created_at DESC LIMIT 20`).bind(email).all(),
+    c.env.DB.prepare("SELECT COUNT(*) as cnt FROM email_suppression WHERE user_email = ?").bind(email).first() as Promise<any>,
+  ]);
+
+  // Daily send trend (last 14 days)
+  const dailyTrend = await c.env.DB.prepare(
+    "SELECT DATE(sent_at) as day, COUNT(*) as sends FROM email_send_log WHERE user_email = ? AND sent_at >= date('now', '-14 days') GROUP BY DATE(sent_at) ORDER BY day"
+  ).bind(email).all();
+
+  // Today's usage
+  const todaySent = await getDailyEmailCount(c.env.DB, email);
+
+  return c.json({
+    totalSent: sent?.cnt || 0,
+    totalOpened: opens?.cnt || 0,
+    totalReplied: replies?.cnt || 0,
+    openRate: sent?.cnt > 0 ? Math.round((opens?.cnt || 0) / sent.cnt * 100) : 0,
+    replyRate: sent?.cnt > 0 ? Math.round((replies?.cnt || 0) / sent.cnt * 100) : 0,
+    suppressedAddresses: suppressions?.cnt || 0,
+    todaySent,
+    dailyLimit: DAILY_EMAIL_LIMIT,
+    dailyTrend: dailyTrend.results,
+    campaignStats: campaigns.results,
+  });
+});
+
+// Suppression list management
+app.get('/api/email-suppression', async (c) => {
+  const email = c.get('userEmail');
+  const list = await c.env.DB.prepare('SELECT * FROM email_suppression WHERE user_email = ? ORDER BY created_at DESC').bind(email).all();
+  return c.json(list.results);
+});
+
+app.delete('/api/email-suppression/:id', async (c) => {
+  const email = c.get('userEmail');
+  await c.env.DB.prepare('DELETE FROM email_suppression WHERE id = ? AND user_email = ?').bind(c.req.param('id'), email).run();
+  return c.json({ success: true });
+});
+
+// ══════════════════════════════════════════════════════════════════
+// AI CHAT — Refine generated emails conversationally
+// ══════════════════════════════════════════════════════════════════
+
+app.post('/api/chat/message/:messageId', async (c) => {
+  const email = c.get('userEmail');
+  const messageId = c.req.param('messageId');
+  const { instruction, messageType } = await c.req.json<{ instruction: string; messageType?: 'persona_message' | 'campaign_email' }>();
+
+  if (!instruction) return c.json({ error: 'instruction is required' }, 400);
+
+  const srcType = messageType || 'persona_message';
+  let currentContent = '';
+  let accountId: number | null = null;
+  let subject = '';
+
+  // Fetch the current email content
+  if (srcType === 'persona_message') {
+    const msg = await c.env.DB.prepare('SELECT content, subject, account_id FROM persona_messages WHERE id = ? AND user_email = ?').bind(messageId, email).first() as any;
+    if (!msg) return c.json({ error: 'Message not found' }, 404);
+    currentContent = msg.content;
+    subject = msg.subject || '';
+    accountId = msg.account_id;
+  } else {
+    const msg = await c.env.DB.prepare('SELECT ce.content, ce.subject, ce.account_id FROM campaign_emails ce JOIN campaigns c ON ce.campaign_id = c.id WHERE ce.id = ? AND c.user_email = ?').bind(messageId, email).first() as any;
+    if (!msg) return c.json({ error: 'Campaign email not found' }, 404);
+    currentContent = msg.content;
+    subject = msg.subject || '';
+    accountId = msg.account_id;
+  }
+
+  // Fetch chat history for context
+  const history = await c.env.DB.prepare(
+    'SELECT role, content FROM email_chat_history WHERE message_id = ? AND message_type = ? AND user_email = ? ORDER BY created_at ASC LIMIT 20'
+  ).bind(messageId, srcType, email).all();
+
+  // Build the AI conversation
+  const messages: { role: 'system' | 'user' | 'assistant'; content: string }[] = [
+    {
+      role: 'system',
+      content: `You are an expert email editor helping a sales representative refine their outreach email. The user will give you instructions to modify the email. Apply the requested changes and return the FULL updated email (including Subject: line). Keep the same general structure unless asked to change it. Do not explain your changes — just return the revised email.`,
+    },
+    {
+      role: 'user',
+      content: `Here is the current email:\n\nSubject: ${subject}\n\n${currentContent}`,
+    },
+    {
+      role: 'assistant',
+      content: `I have the email ready. What changes would you like me to make?`,
+    },
+  ];
+
+  // Append chat history
+  for (const h of history.results as any[]) {
+    messages.push({ role: h.role as 'user' | 'assistant', content: h.content });
+  }
+
+  // Add the new user instruction
+  messages.push({ role: 'user', content: instruction });
+
+  // Run AI
+  const response = await c.env.AI.run(EMAIL_MODEL as any, { messages, max_tokens: 4096, temperature: 0.5 });
+  const revised = (response as any).response || '';
+
+  if (!revised) return c.json({ error: 'AI returned empty response' }, 500);
+
+  // Save chat history (user instruction + AI response)
+  await c.env.DB.batch([
+    c.env.DB.prepare('INSERT INTO email_chat_history (message_id, message_type, role, content, user_email) VALUES (?,?,?,?,?)')
+      .bind(messageId, srcType, 'user', instruction, email),
+    c.env.DB.prepare('INSERT INTO email_chat_history (message_id, message_type, role, content, user_email) VALUES (?,?,?,?,?)')
+      .bind(messageId, srcType, 'assistant', revised, email),
+  ]);
+
+  // Extract new subject if present and update the message
+  const newSubject = revised.match(/Subject:?\s*(.+?)(?:\n|$)/i)?.[1]?.trim() || subject;
+  const newContent = revised.replace(/^Subject:?\s*.+?\n*/im, '').trim();
+
+  if (srcType === 'persona_message') {
+    await c.env.DB.prepare('UPDATE persona_messages SET content = ?, subject = ?, approval_status = ? WHERE id = ? AND user_email = ?')
+      .bind(revised, newSubject, 'pending_approval', messageId, email).run();
+  } else {
+    await c.env.DB.prepare('UPDATE campaign_emails SET content = ?, subject = ?, approval_status = ? WHERE id = ?')
+      .bind(revised, newSubject, 'pending_approval', messageId).run();
+  }
+
+  return c.json({ success: true, subject: newSubject, content: revised, originalContent: currentContent });
+});
+
+// Get chat history for a message
+app.get('/api/chat/history/:messageId', async (c) => {
+  const email = c.get('userEmail');
+  const messageId = c.req.param('messageId');
+  const messageType = c.req.query('type') || 'persona_message';
+  const history = await c.env.DB.prepare(
+    'SELECT role, content, created_at FROM email_chat_history WHERE message_id = ? AND message_type = ? AND user_email = ? ORDER BY created_at ASC'
+  ).bind(messageId, messageType, email).all();
+  return c.json(history.results);
 });
 
 // ══════════════════════════════════════════════════════════════════
@@ -4800,6 +5160,78 @@ const worker = {
         }
       } catch (e) { console.error(`[Cron] SF auto-sync failed for ${email}:`, e); }
     }
+
+    // ── 6. Execute scheduled sequence touches ─────────────────────
+    try {
+      const dueSequences = await env.DB.prepare(
+        "SELECT * FROM sequences WHERE status = 'active' AND next_send_at IS NOT NULL AND next_send_at <= datetime('now') AND to_address IS NOT NULL LIMIT 20"
+      ).all();
+
+      for (const seq of dueSequences.results as any[]) {
+        try {
+          const touches = JSON.parse(seq.touches || '[]');
+          const currentTouch = seq.current_touch || 0;
+          if (currentTouch >= touches.length) {
+            await env.DB.prepare("UPDATE sequences SET status = 'completed' WHERE id = ?").bind(seq.id).run();
+            continue;
+          }
+
+          const touch = touches[currentTouch];
+          if (!touch?.content || touch.channel !== 'email') {
+            // Skip non-email touches (LinkedIn, phone), advance to next
+            const nextTouch = currentTouch + 1;
+            const nextDay = touches[nextTouch]?.day || 0;
+            const nextSendAt = nextTouch < touches.length ? `datetime('now', '+${nextDay} days')` : null;
+            await env.DB.prepare(`UPDATE sequences SET current_touch = ?, next_send_at = ${nextSendAt ? nextSendAt : 'NULL'} WHERE id = ?`)
+              .bind(nextTouch, seq.id).run();
+            continue;
+          }
+
+          // Check daily limit
+          const dailySent = await getDailyEmailCount(env.DB, seq.user_email);
+          if (dailySent >= DAILY_EMAIL_LIMIT) continue;
+
+          const { clientId, clientSecret } = await getGoogleCreds(env.DB, env);
+          if (!clientId || !clientSecret) continue;
+          const accessToken = await refreshGmailToken(env.DB, seq.user_email, clientId, clientSecret);
+          if (!accessToken) continue;
+
+          const stored = await env.DB.prepare('SELECT gmail_address FROM gmail_tokens WHERE user_email = ?').bind(seq.user_email).first() as any;
+          const from = stored?.gmail_address || seq.user_email;
+
+          const suppCheck = await isAddressSuppressed(env.DB, seq.to_address, seq.user_email);
+          if (suppCheck.suppressed) {
+            await env.DB.prepare("UPDATE sequences SET status = 'paused' WHERE id = ?").bind(seq.id).run();
+            continue;
+          }
+
+          const touchSubject = touch.content.match(/Subject:?\s*(.+?)(?:\n|$)/i)?.[1]?.trim() || `Touch ${currentTouch + 1}`;
+          const signature = await getGmailSignature(accessToken, from);
+          const rawEmail = buildRawEmail(from, seq.to_address, touchSubject, touch.content, signature);
+          const encoded = encodeRawEmail(rawEmail);
+
+          const sendRes = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ raw: encoded }),
+          });
+
+          if (sendRes.ok) {
+            await tryLogEmailSend(env.DB, seq.user_email, seq.to_address, touchSubject, 'single');
+            const nextTouch = currentTouch + 1;
+            if (nextTouch >= touches.length) {
+              await env.DB.prepare("UPDATE sequences SET current_touch = ?, status = 'completed', next_send_at = NULL WHERE id = ?")
+                .bind(nextTouch, seq.id).run();
+            } else {
+              const nextDay = (touches[nextTouch]?.day || 0) - (touch.day || 0);
+              await env.DB.prepare(`UPDATE sequences SET current_touch = ?, next_send_at = datetime('now', '+${Math.max(1, nextDay)} days') WHERE id = ?`)
+                .bind(nextTouch, seq.id).run();
+            }
+            console.log(`[Cron] Sequence ${seq.id} touch ${currentTouch + 1} sent to ${seq.to_address}`);
+          }
+        } catch (e) { console.error(`[Cron] Sequence ${seq.id} failed:`, e); }
+      }
+    } catch (e) { console.error('[Cron] Sequence execution failed:', e); }
 
     console.log('[Cron] Nightly job complete');
   },

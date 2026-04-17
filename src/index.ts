@@ -245,8 +245,8 @@ app.use('/api/*', async (c, next) => {
     console.error('SECURITY: JWT present but CF_ACCESS_TEAM_DOMAIN not set. Rejecting unverified token.');
   }
 
-  // 2. Fallback: Cf-Access-Authenticated-User-Email header (set by Access gateway)
-  if (!email) {
+  // 2. Fallback: Cf-Access-Authenticated-User-Email header (only trusted when Access is configured)
+  if (!email && c.env.CF_ACCESS_TEAM_DOMAIN) {
     email = c.req.header('Cf-Access-Authenticated-User-Email') || '';
   }
 
@@ -2736,7 +2736,7 @@ app.get('/api/gmail/connect', async (c) => {
   const statePayload = nonce + ':' + c.get('userEmail');
   const hmacKey = await crypto.subtle.importKey('raw', new TextEncoder().encode(_encSecret || ENC_SALT), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
   const sig = await crypto.subtle.sign('HMAC', hmacKey, new TextEncoder().encode(statePayload));
-  const sigHex = Array.from(new Uint8Array(sig)).map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 16);
+  const sigHex = Array.from(new Uint8Array(sig)).map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 32);
   const state = btoa(statePayload + ':' + sigHex);
 
   const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?` +
@@ -2765,7 +2765,7 @@ app.get('/api/gmail/callback', async (c) => {
     const payload = parts.join(':'); // nonce:email
     const hmacKey = await crypto.subtle.importKey('raw', new TextEncoder().encode(_encSecret || ENC_SALT), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
     const expectedSig = await crypto.subtle.sign('HMAC', hmacKey, new TextEncoder().encode(payload));
-    const expectedHex = Array.from(new Uint8Array(expectedSig)).map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 16);
+    const expectedHex = Array.from(new Uint8Array(expectedSig)).map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 32);
     if (receivedSig !== expectedHex) {
       console.error('OAuth state HMAC mismatch — possible CSRF');
       return c.html('<h2>Authorization failed</h2><p>Invalid state parameter. Please try connecting again.</p>');
@@ -2795,7 +2795,8 @@ app.get('/api/gmail/callback', async (c) => {
 
   if (!tokenRes.ok) {
     const err = await tokenRes.text();
-    return c.html(`<h2>Token exchange failed</h2><pre>${err}</pre>`);
+    console.error('Gmail token exchange failed:', err);
+    return c.html('<h2>Gmail authorization failed</h2><p>Could not complete the token exchange. Please try connecting again.</p>');
   }
 
   const tokens = await tokenRes.json() as any;
@@ -4362,8 +4363,13 @@ app.get('/api/salesforce/connect', async (c) => {
   const { clientId } = await getSFCreds(c.env.DB);
   if (!clientId) return c.json({ error: 'Salesforce Client ID not configured. Save it in Settings.' }, 500);
   const redirectUri = new URL('/api/salesforce/callback', c.req.url).toString();
+  // HMAC-sign the state to prevent CSRF forgery
   const nonce = crypto.randomUUID().slice(0, 8);
-  const state = btoa(nonce + ':' + c.get('userEmail'));
+  const statePayload = nonce + ':' + c.get('userEmail');
+  const hmacKey = await crypto.subtle.importKey('raw', new TextEncoder().encode(_encSecret || ENC_SALT), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const sig = await crypto.subtle.sign('HMAC', hmacKey, new TextEncoder().encode(statePayload));
+  const sigHex = Array.from(new Uint8Array(sig)).map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 32);
+  const state = btoa(statePayload + ':' + sigHex);
   const authUrl = `https://login.salesforce.com/services/oauth2/authorize?response_type=code&client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&state=${encodeURIComponent(state)}`;
   return c.redirect(authUrl);
 });
@@ -4373,7 +4379,22 @@ app.get('/api/salesforce/callback', async (c) => {
   const code = c.req.query('code');
   const stateParam = c.req.query('state') || '';
   let email = c.get('userEmail');
-  try { email = atob(stateParam).split(':').slice(1).join(':'); } catch (e) { console.error('Operation failed:', e); }
+
+  // Verify HMAC-signed state to prevent CSRF
+  try {
+    const decoded = atob(stateParam);
+    const parts = decoded.split(':');
+    const receivedSig = parts.pop() || '';
+    const payload = parts.join(':');
+    const hmacKey = await crypto.subtle.importKey('raw', new TextEncoder().encode(_encSecret || ENC_SALT), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+    const expectedSig = await crypto.subtle.sign('HMAC', hmacKey, new TextEncoder().encode(payload));
+    const expectedHex = Array.from(new Uint8Array(expectedSig)).map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 32);
+    if (receivedSig !== expectedHex) {
+      console.error('SF OAuth state HMAC mismatch — possible CSRF');
+      return c.html('<h2>Authorization failed</h2><p>Invalid state parameter. Please try connecting again.</p>');
+    }
+    email = parts.slice(1).join(':');
+  } catch (e) { console.error('SF OAuth state verification failed:', e); }
 
   const { clientId, clientSecret } = await getSFCreds(c.env.DB);
   if (!code || !clientId || !clientSecret) return c.html('<h2>Salesforce auth failed</h2>');
@@ -4384,7 +4405,7 @@ app.get('/api/salesforce/callback', async (c) => {
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({ grant_type: 'authorization_code', code, client_id: clientId, client_secret: clientSecret, redirect_uri: redirectUri }),
   });
-  if (!tokenRes.ok) return c.html('<h2>Token exchange failed</h2><pre>' + await tokenRes.text() + '</pre>');
+  if (!tokenRes.ok) { console.error('SF token exchange failed:', await tokenRes.text()); return c.html('<h2>Salesforce authorization failed</h2><p>Could not complete the token exchange. Please try connecting again.</p>'); }
   const tokens = await tokenRes.json() as any;
 
   // Encrypt tokens before storing

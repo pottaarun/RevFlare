@@ -646,7 +646,7 @@ function renderGlobalThreats(c) {
         rh += ' &middot; ' + (inc.publishedAt ? new Date(inc.publishedAt).toLocaleDateString() : '');
         rh += '</div>';
         if (inc.summary) rh += '<p style="font-size:12px;color:var(--text-tertiary);margin-top:6px;line-height:1.5">' + esc(inc.summary.slice(0, 150)) + '</p>';
-        if (prods.length) { rh += '<div style="display:flex;flex-wrap:wrap;gap:3px;margin-top:6px">'; for (var j=0;j<prods.length;j++) rh += '<span class="stack-chip is-cf" style="font-size:10px;padding:2px 6px">' + prods[j] + '</span>'; rh += '</div>'; }
+        if (prods.length) { rh += '<div style="display:flex;flex-wrap:wrap;gap:3px;margin-top:6px">'; for (var j=0;j<prods.length;j++) rh += '<span class="stack-chip is-cf" style="font-size:10px;padding:2px 6px">' + esc(prods[j]) + '</span>'; rh += '</div>'; }
         rh += '<div style="display:flex;gap:6px;margin-top:8px"><button class="btn btn-primary btn-sm global-threat-email" data-idx="' + i + '">' + IC.send + ' Draft Email</button><a href="' + inc.url + '" target="_blank" class="btn btn-ghost btn-sm" style="font-size:11px">' + IC.globe + ' Read</a></div>';
         rh += '</div>';
         rh += '</div></div>';
@@ -815,7 +815,7 @@ function tabThreats(c, a) {
         if (inc.product) rh += ' &middot; ' + esc(inc.product);
         rh += ' &middot; ' + (inc.publishedAt ? new Date(inc.publishedAt).toLocaleDateString() : '') + '</div>';
         if (inc.summary) rh += '<p style="font-size:12px;color:var(--text-tertiary);margin-top:5px;line-height:1.5">' + esc(inc.summary.slice(0, 180)) + '</p>';
-        if (prods.length) { rh += '<div style="display:flex;flex-wrap:wrap;gap:3px;margin-top:6px">'; for (var j=0;j<prods.length;j++) rh += '<span class="stack-chip is-cf" style="font-size:10px;padding:2px 6px">' + prods[j] + '</span>'; rh += '</div>'; }
+        if (prods.length) { rh += '<div style="display:flex;flex-wrap:wrap;gap:3px;margin-top:6px">'; for (var j=0;j<prods.length;j++) rh += '<span class="stack-chip is-cf" style="font-size:10px;padding:2px 6px">' + esc(prods[j]) + '</span>'; rh += '</div>'; }
         rh += '<div style="display:flex;gap:6px;margin-top:8px">';
         rh += '<button class="btn btn-primary btn-sm gen-acct-threat-email" data-idx="' + i + '">' + IC.send + ' Draft Email</button>';
         rh += '<a href="' + inc.url + '" target="_blank" class="btn btn-ghost btn-sm" style="font-size:11px">' + IC.globe + ' Article</a>';
@@ -2239,11 +2239,11 @@ function renderShareView(container, token) {
 
     // Account header
     h += '<div class="acct-hero">';
-    h += '<h1 class="acct-name">' + a.account_name + '</h1>';
+    h += '<h1 class="acct-name">' + esc(a.account_name) + '</h1>';
     h += '<div class="acct-meta-row" style="margin-top:12px">';
-    if (a.industry) h += '<span class="acct-meta-item">' + IC.building + ' ' + a.industry + '</span>';
-    if (a.website) h += '<span class="acct-meta-item">' + IC.globe + ' ' + a.website + '</span>';
-    if (a.billing_country) h += '<span class="acct-meta-item">' + [a.billing_city, a.billing_state, a.billing_country].filter(Boolean).join(', ') + '</span>';
+    if (a.industry) h += '<span class="acct-meta-item">' + IC.building + ' ' + esc(a.industry) + '</span>';
+    if (a.website) h += '<span class="acct-meta-item">' + IC.globe + ' ' + esc(a.website) + '</span>';
+    if (a.billing_country) h += '<span class="acct-meta-item">' + [a.billing_city, a.billing_state, a.billing_country].filter(Boolean).map(esc).join(', ') + '</span>';
     h += '</div>';
     h += '<div class="acct-kpis" style="margin-top:20px">';
     h += '<div><div class="acct-kpi-label">IT Spend/mo</div><div class="acct-kpi-value purple">' + fmtD(a.total_it_spend) + '</div></div>';
@@ -2258,7 +2258,7 @@ function renderShareView(container, token) {
       for (var i = 0; i < research.length; i++) {
         var r = research[i];
         h += '<div class="output-card" style="margin-bottom:16px">';
-        h += '<div class="output-header"><div class="output-header-left"><div class="output-header-title">' + (r.title || r.report_type) + '</div></div>';
+        h += '<div class="output-header"><div class="output-header-left"><div class="output-header-title">' + esc(r.title || r.report_type) + '</div></div>';
         h += '<span style="font-size:11px;color:var(--text-muted)">' + timeAgo(r.created_at) + '</span></div>';
         h += '<div class="output-body">' + md(r.content) + '</div></div>';
       }
@@ -2272,8 +2272,8 @@ function renderShareView(container, token) {
         var pm = PERSONA_META[m.persona] || { icon: '', color: '' };
         h += '<div class="email-preview" style="margin-bottom:16px">';
         h += '<div class="email-toolbar"><div class="email-dot r"></div><div class="email-dot y"></div><div class="email-dot g"></div>';
-        h += '<span style="margin-left:auto;font-size:11px;color:var(--text-muted);font-weight:600">' + (m.persona || '').toUpperCase() + ' / ' + m.message_type + '</span></div>';
-        h += '<div class="email-subject-bar"><div class="email-subject-label">Subject</div><div class="email-subject">' + (m.subject || '') + '</div></div>';
+        h += '<span style="margin-left:auto;font-size:11px;color:var(--text-muted);font-weight:600">' + esc((m.persona || '').toUpperCase()) + ' / ' + esc(m.message_type) + '</span></div>';
+        h += '<div class="email-subject-bar"><div class="email-subject-label">Subject</div><div class="email-subject">' + esc(m.subject || '') + '</div></div>';
         h += '<div class="email-body">' + md(m.content) + '</div></div>';
       }
     }

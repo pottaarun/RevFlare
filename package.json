@@ -5,6 +5,8 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "db:create": "wrangler d1 create revflare-db",
     "db:init": "wrangler d1 execute revflare-db --local --file=schema.sql",
     "db:init:remote": "wrangler d1 execute revflare-db --remote --file=schema.sql",

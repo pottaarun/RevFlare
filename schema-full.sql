@@ -55,6 +55,9 @@ CREATE TABLE IF NOT EXISTS page_views (id INTEGER PRIMARY KEY AUTOINCREMENT, pag
 -- Semantic Search Cache
 CREATE TABLE IF NOT EXISTS vectorize_cache (id INTEGER PRIMARY KEY AUTOINCREMENT, content_type TEXT NOT NULL, content_id INTEGER NOT NULL, content_text TEXT NOT NULL, account_id INTEGER, user_email TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
 
+-- Email Send Log (daily limit tracking — 100/day per user)
+CREATE TABLE IF NOT EXISTS email_send_log (id INTEGER PRIMARY KEY AUTOINCREMENT, user_email TEXT NOT NULL, recipient TEXT, subject TEXT, source TEXT DEFAULT 'single', sent_at DATETIME DEFAULT CURRENT_TIMESTAMP);
+
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_accounts_name ON accounts(account_name);
 CREATE INDEX IF NOT EXISTS idx_accounts_industry ON accounts(industry);
@@ -78,3 +81,4 @@ CREATE INDEX IF NOT EXISTS idx_alerts_user ON alerts(user_email, read);
 CREATE INDEX IF NOT EXISTS idx_vec_cache ON vectorize_cache(user_email, content_type);
 CREATE INDEX IF NOT EXISTS idx_page_views_user ON page_views(user_email, page);
 CREATE INDEX IF NOT EXISTS idx_page_views_time ON page_views(created_at);
+CREATE INDEX IF NOT EXISTS idx_email_send_log_user_date ON email_send_log(user_email, sent_at);

@@ -69,6 +69,30 @@ function statusPill(s){if(!s)return'<span class="pill pill-neutral">Unknown</spa
 function timeAgo(d){if(!d)return'--';const t=new Date(d);if(isNaN(t))return d;const days=Math.floor((Date.now()-t)/864e5);if(!days)return'Today';if(days===1)return'Yesterday';if(days<30)return days+'d ago';if(days<365)return Math.floor(days/30)+'mo ago';return Math.floor(days/365)+'y ago';}
 function truncate(s,n){return s&&s.length>n?s.slice(0,n)+'\u2026':s||'';}
 function toast(m,t=''){let e=$('#toast');if(!e){e=document.createElement('div');e.id='toast';e.className='toast';document.body.appendChild(e);}e.textContent=m;e.className=`toast ${t?'toast-'+t:''} show`;clearTimeout(e._t);e._t=setTimeout(()=>e.classList.remove('show'),3500);}
+
+// ── Daily email limit notification ──────────────────────────────────
+function showEmailLimitNotice(sent, limit) {
+  // Remove any existing notice
+  var existing = document.getElementById('email-limit-notice');
+  if (existing) existing.remove();
+
+  var notice = document.createElement('div');
+  notice.id = 'email-limit-notice';
+  notice.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:10000;background:linear-gradient(135deg,#fbbf24,#f59e0b);color:#78350f;padding:14px 20px;font-size:14px;font-weight:500;display:flex;align-items:center;justify-content:center;gap:12px;box-shadow:0 4px 20px rgba(0,0,0,0.15);animation:slideDown 0.3s ease';
+  notice.innerHTML = '<span style="font-size:20px">\u26A0\uFE0F</span>'
+    + '<span><strong>Daily email limit reached</strong> \u2014 You\u2019ve sent ' + sent + ' of ' + limit + ' emails today. '
+    + 'This limit protects your email domain reputation and prevents abuse flags. '
+    + 'If you need a higher limit, please contact your RevFlare administrator.</span>'
+    + '<button onclick="this.parentElement.remove()" style="background:rgba(120,53,15,0.2);border:none;color:#78350f;font-weight:700;padding:4px 12px;border-radius:6px;cursor:pointer;font-size:13px;white-space:nowrap;flex-shrink:0">Dismiss</button>';
+  document.body.appendChild(notice);
+}
+
+function showEmailLimitWarning(sent, limit) {
+  var remaining = limit - sent;
+  if (remaining <= 10 && remaining > 0) {
+    toast('Daily email limit warning: ' + remaining + ' of ' + limit + ' emails remaining today', 'error');
+  }
+}
 // HTML escape to prevent XSS
 function esc(s){if(!s)return'';return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
 function md(s){if(!s)return'';
@@ -330,8 +354,8 @@ async function loadAccounts(){
   try{
     const d=await api.get(`/accounts?${p}`);const mx=Math.max(...d.accounts.map(a=>a.total_it_spend||0),1);
     tbody.innerHTML=d.accounts.length?d.accounts.map(a=>`<tr>
-      <td><a href="#/account/${a.id}" class="row-link">${a.account_name||'--'}</a></td>
-      <td style="font-size:12px;color:var(--text-muted)">${truncate(a.industry,24)||'--'}</td>
+      <td><a href="#/account/${a.id}" class="row-link">${esc(a.account_name)||'--'}</a></td>
+      <td style="font-size:12px;color:var(--text-muted)">${esc(truncate(a.industry,24))||'--'}</td>
       <td>${statusPill(a.account_status)}</td>
       <td><div class="spend-cell"><span style="min-width:52px;font-weight:600">${fmtD(a.total_it_spend)}</span><div class="spend-bar"><div class="spend-bar-fill" style="width:${((a.total_it_spend||0)/mx*100).toFixed(0)}%"></div></div></div></td>
       <td><span class="stack-chip${(a.cdn_primary||'').toLowerCase().includes('cloudflare')?' is-cf':''}">${truncate(a.cdn_primary,18)||'--'}</span></td>
@@ -613,14 +637,14 @@ function renderGlobalThreats(c) {
         rh += '<div style="flex:1">';
         rh += '<div style="font-size:13px;font-weight:700;color:var(--text-primary);line-height:1.4">';
         if (isNew) rh += '<span style="font-size:9px;padding:2px 5px;background:rgba(251,146,60,0.12);color:#fb923c;border-radius:3px;font-weight:700;margin-right:6px;vertical-align:middle">NEW</span>';
-        rh += inc.title + '</div>';
+        rh += esc(inc.title) + '</div>';
         rh += '<div style="font-size:11px;color:var(--text-muted);margin-top:3px">';
-        rh += inc.source;
-        if (inc.country) rh += ' &middot; ' + inc.country;
-        if (inc.product) rh += ' &middot; ' + inc.product;
+        rh += esc(inc.source);
+        if (inc.country) rh += ' &middot; ' + esc(inc.country);
+        if (inc.product) rh += ' &middot; ' + esc(inc.product);
         rh += ' &middot; ' + (inc.publishedAt ? new Date(inc.publishedAt).toLocaleDateString() : '');
         rh += '</div>';
-        if (inc.summary) rh += '<p style="font-size:12px;color:var(--text-tertiary);margin-top:6px;line-height:1.5">' + inc.summary.slice(0, 150) + '</p>';
+        if (inc.summary) rh += '<p style="font-size:12px;color:var(--text-tertiary);margin-top:6px;line-height:1.5">' + esc(inc.summary.slice(0, 150)) + '</p>';
         if (prods.length) { rh += '<div style="display:flex;flex-wrap:wrap;gap:3px;margin-top:6px">'; for (var j=0;j<prods.length;j++) rh += '<span class="stack-chip is-cf" style="font-size:10px;padding:2px 6px">' + prods[j] + '</span>'; rh += '</div>'; }
         rh += '<div style="display:flex;gap:6px;margin-top:8px"><button class="btn btn-primary btn-sm global-threat-email" data-idx="' + i + '">' + IC.send + ' Draft Email</button><a href="' + inc.url + '" target="_blank" class="btn btn-ghost btn-sm" style="font-size:11px">' + IC.globe + ' Read</a></div>';
         rh += '</div>';
@@ -822,7 +846,7 @@ function tabThreats(c, a) {
                 + '<div class="email-subject-label">Subject</div><div class="email-subject">' + subject + '</div></div>'
                 + '<div class="email-body">' + md(emailBody) + '</div>'
                 + '<div class="email-actions"><button class="btn btn-primary btn-sm" onclick="copyEl(this,\'email\')">' + IC.copy + ' Copy Email</button>'
-                + (window._gmailConnected ? '<button class="btn btn-sm" style="background:linear-gradient(135deg,#34d399,#10b981);color:#fff" onclick="var to=prompt(\'Send to:\');if(!to)return;fetch(\'/api/gmail/send\',{method:\'POST\',headers:{\'Content-Type\':\'application/json\'},body:JSON.stringify({to:to,subject:\'' + subject.replace(/'/g, "\\'") + '\',body:this.closest(\'.email-preview\').querySelector(\'.email-body\').innerText})}).then(function(r){return r.json()}).then(function(d){if(d.success)alert(\'Sent!\');else alert(d.error)})">' + IC.send + ' Send via Gmail</button>' : '')
+                + (window._gmailConnected ? '<button class="btn btn-sm" style="background:linear-gradient(135deg,#34d399,#10b981);color:#fff" onclick="var to=prompt(\'Send to:\');if(!to)return;fetch(\'/api/gmail/send\',{method:\'POST\',headers:{\'Content-Type\':\'application/json\'},body:JSON.stringify({to:to,subject:\'' + subject.replace(/'/g, "\\'") + '\',body:this.closest(\'.email-preview\').querySelector(\'.email-body\').innerText})}).then(function(r){return r.json()}).then(function(d){if(d.success){alert(\'Sent!\');if(d.dailyLimit)showEmailLimitWarning(d.dailyLimit.sent,d.dailyLimit.limit)}else if(d.code===\'DAILY_LIMIT_REACHED\'){showEmailLimitNotice(d.sent,d.dailyLimit)}else{alert(d.error)}})">' + IC.send + ' Send via Gmail</button>' : '')
                 + '</div></div>';
               btn.disabled = false;
               btn.innerHTML = IC.send + ' Draft Email';
@@ -1364,9 +1388,15 @@ async function generateEmail(a, cache) {
           sendGmailBtn.innerHTML = '\u2713 Sent!';
           sendGmailBtn.style.cssText = 'background:var(--green);color:#fff';
           toast('Email sent to ' + toAddr, 'success');
+          // Warn if approaching daily limit
+          if (d.dailyLimit) showEmailLimitWarning(d.dailyLimit.sent, d.dailyLimit.limit);
         } else {
           sendGmailBtn.innerHTML = IC.send + ' Failed';
-          toast('Send failed: ' + (d.error || 'Unknown error'), 'error');
+          if (d.code === 'DAILY_LIMIT_REACHED') {
+            showEmailLimitNotice(d.sent, d.dailyLimit);
+          } else {
+            toast('Send failed: ' + (d.error || 'Unknown error'), 'error');
+          }
           sendGmailBtn.disabled = false;
           setTimeout(function() { sendGmailBtn.innerHTML = IC.send + ' Send via Gmail'; }, 2000);
         }

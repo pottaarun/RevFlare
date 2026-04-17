@@ -15,17 +15,212 @@ type Bindings = {
   GOOGLE_CLIENT_ID?: string;
   GOOGLE_CLIENT_SECRET?: string;
   INTRICATELY_API_KEY?: string;
+  // Security: set via `wrangler secret put`
+  DEV_MODE?: string;            // Set to 'true' only for local dev
+  ENC_SECRET?: string;          // Secret key for AES-GCM encryption derivation
+  CF_ACCESS_TEAM_DOMAIN?: string; // e.g. 'myteam.cloudflareaccess.com' for JWT verification
+  CF_ACCESS_AUD?: string;       // Application Audience (AUD) tag from Access
 };
+
+// ── DB Row Interfaces ──────────────────────────────────────────────
+interface AccountRow {
+  id: number;
+  account_name: string;
+  website: string | null;
+  website_domain: string | null;
+  industry: string | null;
+  status: string | null;
+  account_status: string | null;
+  account_segment: string | null;
+  billing_country: string | null;
+  billing_city: string | null;
+  billing_state: string | null;
+  current_monthly_fee: number | null;
+  revenue_bucket: string | null;
+  employee_bucket: string | null;
+  annual_revenue: number | null;
+  employees: number | null;
+  sam: number | null;
+  linkedin_url: string | null;
+  linkedin_followers: number | null;
+  total_it_spend: number | null;
+  cdn_primary: string | null;
+  cdn_spend: number | null;
+  cdn_products: string | null;
+  security_primary: string | null;
+  security_spend: number | null;
+  security_products: string | null;
+  dns_primary: string | null;
+  dns_products: string | null;
+  cloud_hosting_primary: string | null;
+  cloud_hosting_products: string | null;
+  data_center_products: string | null;
+  apm_products: string | null;
+  saas_products: string | null;
+  opportunities_total: number;
+  opportunities_open: number;
+  opportunities_closed_lost: number;
+  last_activity: string | null;
+  activities_last_30: number;
+  user_email: string;
+  created_at: string;
+  [key: string]: any; // allow extra columns
+}
+
+interface GmailTokenRow {
+  id: number;
+  user_email: string;
+  access_token: string;
+  refresh_token: string;
+  gmail_address: string | null;
+  expires_at: number;
+}
+
+interface SalesforceTokenRow {
+  user_email: string;
+  instance_url: string;
+  access_token: string;
+  refresh_token: string;
+  expires_at: number;
+}
+
+interface PersonaMessageRow {
+  id: number;
+  account_id: number;
+  persona: string;
+  message_type: string;
+  subject: string | null;
+  content: string;
+  approval_status: string;
+  user_email: string;
+  created_at: string;
+}
+
+interface CampaignEmailRow {
+  id: number;
+  campaign_id: number;
+  account_id: number;
+  account_name: string | null;
+  subject: string | null;
+  content: string | null;
+  status: string;
+  approval_status: string;
+  created_at: string;
+}
+
+interface ContactRow {
+  id: number;
+  account_id: number;
+  first_name: string;
+  last_name: string;
+  email: string;
+  title: string | null;
+  phone: string | null;
+  linkedin_url: string | null;
+  role: string | null;
+  is_primary: number;
+  salesforce_id: string | null;
+  user_email: string;
+  created_at: string;
+}
+
+interface CountResult { cnt: number; }
+interface AlertRow { id: number; account_id: number | null; alert_type: string; title: string; detail: string | null; severity: string; read: number; user_email: string; created_at: string; }
 
 const app = new Hono<{ Bindings: Bindings; Variables: { userEmail: string } }>();
 app.use('/api/*', cors({
   origin: (origin) => {
-    // Allow same-origin, workers.dev, and local dev
-    if (!origin) return '*'; // same-origin requests
-    if (origin.endsWith('.workers.dev') || origin.includes('localhost') || origin.includes('127.0.0.1')) return origin;
-    return origin; // Allow the requesting origin (Access handles auth)
+    if (!origin) return '*'; // same-origin requests (no Origin header)
+    // Whitelist: only workers.dev subdomains and local dev
+    if (origin.endsWith('.workers.dev')) return origin;
+    if (origin.includes('localhost') || origin.includes('127.0.0.1')) return origin;
+    // Deny all other cross-origin requests
+    return null as any;
   },
 }));
+
+// ── JWT Verification Helper ─────────────────────────────────────────
+// Cache JWKS keys in memory (refreshed on Worker cold start)
+let _jwksCache: { keys: JsonWebKey[]; fetchedAt: number } | null = null;
+
+async function getAccessPublicKeys(teamDomain: string): Promise<JsonWebKey[]> {
+  // Cache for 1 hour
+  if (_jwksCache && Date.now() - _jwksCache.fetchedAt < 3600000) return _jwksCache.keys;
+  try {
+    const res = await fetch(`https://${teamDomain}/cdn-cgi/access/certs`);
+    if (!res.ok) throw new Error('JWKS fetch failed: ' + res.status);
+    const data = await res.json() as { keys: JsonWebKey[] };
+    _jwksCache = { keys: data.keys || [], fetchedAt: Date.now() };
+    return _jwksCache.keys;
+  } catch (e) {
+    console.error('Failed to fetch Access JWKS:', e);
+    return _jwksCache?.keys || [];
+  }
+}
+
+async function verifyAccessJWT(token: string, teamDomain: string, aud?: string): Promise<{ email: string } | null> {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return null;
+
+    const header = JSON.parse(atob(parts[0].replace(/-/g, '+').replace(/_/g, '/')));
+    const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
+
+    // Check expiry
+    if (payload.exp && payload.exp < Date.now() / 1000) return null;
+
+    // Check audience if configured
+    if (aud && payload.aud) {
+      const audArray = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
+      if (!audArray.includes(aud)) return null;
+    }
+
+    // Verify signature using JWKS
+    const keys = await getAccessPublicKeys(teamDomain);
+    const matchingKey = keys.find((k: any) => k.kid === header.kid);
+    if (!matchingKey) {
+      console.error('No matching JWKS key for kid:', header.kid);
+      return null;
+    }
+
+    const cryptoKey = await crypto.subtle.importKey(
+      'jwk', matchingKey,
+      { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+      false, ['verify']
+    );
+
+    const sigData = new TextEncoder().encode(parts[0] + '.' + parts[1]);
+    const signature = Uint8Array.from(atob(parts[2].replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0));
+
+    const valid = await crypto.subtle.verify('RSASSA-PKCS1-v1_5', cryptoKey, signature, sigData);
+    if (!valid) {
+      console.error('JWT signature verification failed');
+      return null;
+    }
+
+    return { email: payload.email || '' };
+  } catch (e) {
+    console.error('JWT verification error:', e);
+    return null;
+  }
+}
+
+// ── Global error handler: standardize all error responses ──────────
+app.onError((err, c) => {
+  console.error('Unhandled error:', err.message, err.stack);
+  const status = 'status' in err ? (err as any).status : 500;
+  return c.json({
+    error: err.message || 'Internal server error',
+    code: 'INTERNAL_ERROR',
+  }, status);
+});
+
+// ── Initialize encryption secret from env on every request ─────────
+app.use('/api/*', async (c, next) => {
+  setEncSecret(c.env.ENC_SECRET);
+  if (!c.env.ENC_SECRET) console.warn('ENC_SECRET not set — encryption keys derived without a secret. Run: wrangler secret put ENC_SECRET');
+  await next();
+});
 
 // ── Auth middleware: extract user email from Cloudflare Access JWT ──
 // Skip auth for public share endpoints
@@ -36,28 +231,29 @@ app.use('/api/*', async (c, next) => {
   if (c.req.path.startsWith('/api/public')) { await next(); return; }
   let email = '';
 
-  // 1. Try Cloudflare Access JWT header
+  // 1. Verify Cloudflare Access JWT (signature-checked)
   const jwt = c.req.header('Cf-Access-Jwt-Assertion');
-  if (jwt) {
+  if (jwt && c.env.CF_ACCESS_TEAM_DOMAIN) {
+    const verified = await verifyAccessJWT(jwt, c.env.CF_ACCESS_TEAM_DOMAIN, c.env.CF_ACCESS_AUD);
+    if (verified) email = verified.email;
+  } else if (jwt) {
+    // Fallback: decode without verification if team domain not configured (log warning)
+    console.warn('CF_ACCESS_TEAM_DOMAIN not set — JWT signature NOT verified. Set this secret for production security.');
     try {
       const payload = jwt.split('.')[1];
       const decoded = JSON.parse(atob(payload.replace(/-/g, '+').replace(/_/g, '/')));
       email = decoded.email || '';
-    } catch (_) {}
+    } catch (e) { console.error('JWT decode failed:', e); }
   }
 
-  // 2. Fallback: Cf-Access-Authenticated-User-Email header (set by Access)
+  // 2. Fallback: Cf-Access-Authenticated-User-Email header (set by Access gateway)
   if (!email) {
     email = c.req.header('Cf-Access-Authenticated-User-Email') || '';
   }
 
-  // 3. Local dev only: allow _user query param when no Access headers present
-  if (!email) {
-    // Only allow in local dev (no CF headers = likely wrangler dev)
-    const isCFRequest = c.req.header('Cf-Connecting-Ip') || c.req.header('Cf-Ray');
-    if (!isCFRequest) {
-      email = c.req.query('_user') || 'default@revflare.local';
-    }
+  // 3. Local dev only: explicit DEV_MODE env var required (not header sniffing)
+  if (!email && c.env.DEV_MODE === 'true') {
+    email = c.req.query('_user') || 'default@revflare.local';
   }
 
   // Reject if still no email in production
@@ -202,12 +398,15 @@ function parseNumeric(val: any): number | null {
   return isNaN(num) ? null : num;
 }
 
-// ── Clear all data before batch upload ─────────────────────────────
+// ── Clear all data before batch upload (atomic batch) ──────────────
 app.post('/api/accounts/clear', async (c) => {
   const email = c.get('userEmail');
-  await c.env.DB.prepare('DELETE FROM persona_messages WHERE user_email = ?').bind(email).run();
-  await c.env.DB.prepare('DELETE FROM research_reports WHERE user_email = ?').bind(email).run();
-  await c.env.DB.prepare('DELETE FROM accounts WHERE user_email = ?').bind(email).run();
+  await c.env.DB.batch([
+    c.env.DB.prepare('DELETE FROM persona_messages WHERE user_email = ?').bind(email),
+    c.env.DB.prepare('DELETE FROM research_reports WHERE user_email = ?').bind(email),
+    c.env.DB.prepare('DELETE FROM contacts WHERE user_email = ?').bind(email),
+    c.env.DB.prepare('DELETE FROM accounts WHERE user_email = ?').bind(email),
+  ]);
   return c.json({ success: true });
 });
 
@@ -661,7 +860,7 @@ async function scrapeWebsite(domain: string, browser?: Fetcher): Promise<{ about
       await browserInstance.close();
     } catch (_) {
       // Browser Rendering failed — fall through to direct fetch
-      try { if (browserInstance) await browserInstance.close(); } catch (_) {}
+      try { if (browserInstance) await browserInstance.close(); } catch (e) { console.error('Browser close failed:', e); }
     }
   }
 
@@ -680,7 +879,7 @@ async function scrapeWebsite(domain: string, browser?: Fetcher): Promise<{ about
       if (!r.ok) return;
       const html = await r.text();
       extractFromHTML(html, url, type);
-    } catch (_) {}
+    } catch (e) { console.error('Operation failed:', e); }
   }));
 
   return result;
@@ -767,7 +966,7 @@ async function lookupDNS(domain: string): Promise<{ aRecords: string[]; cnameRec
         else if (ns.includes('domaincontrol')) result.dnsProvider = 'GoDaddy DNS (confirmed via NS records)';
         else result.dnsProvider = `NS: ${answers.slice(0, 2).join(', ')}`;
       }
-    } catch (_) {}
+    } catch (e) { console.error('Operation failed:', e); }
   }
   return result;
 }
@@ -795,7 +994,7 @@ async function fetchSECFilings(companyName: string): Promise<{ filings: string; 
         }).join('\n');
       }
     }
-  } catch (_) {}
+  } catch (e) { console.error('Operation failed:', e); }
 
   // Method 2: EDGAR company tickers JSON (fast CIK lookup)
   if (!result.filings) {
@@ -845,10 +1044,10 @@ async function fetchSECFilings(companyName: string): Promise<{ filings: string; 
               if (sd.name) result.filings = `SEC Entity: ${sd.name} | SIC: ${sd.sic || 'N/A'} (${sd.sicDescription || ''})\n` + result.filings;
               if (sd.category) result.filings += `\nCategory: ${sd.category}`;
             }
-          } catch (_) {}
+          } catch (e) { console.error('Operation failed:', e); }
         }
       }
-    } catch (_) {}
+    } catch (e) { console.error('Operation failed:', e); }
   }
 
   return result;
@@ -880,7 +1079,7 @@ async function searchNews(companyName: string): Promise<string> {
         }
       }
     }
-  } catch (_) {}
+  } catch (e) { console.error('Operation failed:', e); }
 
   // Source 2: Bing News RSS (fallback if Google returned nothing)
   if (items.length < 2) {
@@ -904,7 +1103,7 @@ async function searchNews(companyName: string): Promise<string> {
           }
         }
       }
-    } catch (_) {}
+    } catch (e) { console.error('Operation failed:', e); }
   }
 
   // Source 3: DuckDuckGo Lite (another fallback)
@@ -925,7 +1124,7 @@ async function searchNews(companyName: string): Promise<string> {
           if (title && title.length > 15) items.push(`- ${title} [DuckDuckGo]`);
         }
       }
-    } catch (_) {}
+    } catch (e) { console.error('Operation failed:', e); }
   }
 
   return items.join('\n');
@@ -966,7 +1165,7 @@ async function searchFunding(companyName: string, domain: string): Promise<strin
 
         if (items.length) items.unshift('[Source: Crunchbase]');
       }
-    } catch (_) {}
+    } catch (e) { console.error('Operation failed:', e); }
   }
 
   // Source 2: Search for funding news
@@ -994,7 +1193,7 @@ async function searchFunding(companyName: string, domain: string): Promise<strin
           }
         }
       }
-    } catch (_) {}
+    } catch (e) { console.error('Operation failed:', e); }
   }
 
   return items.join('\n');
@@ -1078,7 +1277,7 @@ async function fetchIntricately(domain: string, apiKey?: string): Promise<{ comp
     ].filter(Boolean);
     result.raw = lines.join('\n');
 
-  } catch (_) {}
+  } catch (e) { console.error('Operation failed:', e); }
   return result;
 }
 
@@ -1104,7 +1303,7 @@ async function fetchRadarData(domain: string, apiToken?: string, accountId?: str
         result.categories = (details.categories || []).map((c: any) => `${c.name} (#${c.rank})`).slice(0, 5);
       }
     }
-  } catch (_) {}
+  } catch (e) { console.error('Operation failed:', e); }
 
   // Domain summary / traffic trend (if available)
   try {
@@ -1122,7 +1321,7 @@ async function fetchRadarData(domain: string, apiToken?: string, accountId?: str
         result.trafficTrend = `HTTP/2: ${s.http2 || 'N/A'}, HTTP/3: ${s.http3 || 'N/A'}, HTTP/1.x: ${s.http1x || 'N/A'}`;
       }
     }
-  } catch (_) {}
+  } catch (e) { console.error('Operation failed:', e); }
 
   return result;
 }
@@ -1260,7 +1459,7 @@ async function runAI(ai: Ai, model: string, system: string, user: string): Promi
           temperature: 0.7,
         });
         return (fallback as any).response || '';
-      } catch (_) {}
+      } catch (e) { console.error('Operation failed:', e); }
     }
     throw e;
   }
@@ -1404,6 +1603,7 @@ const PERSONA_CONFIGS: Record<string, {
   description: string;
   tone: string;
   focus: string;
+  style?: string;
   messageTypes: { id: string; label: string }[];
 }> = {
   bdr: {
@@ -1566,7 +1766,7 @@ app.post('/api/messaging/:accountId', async (c) => {
 
   const account = await c.env.DB.prepare(
     'SELECT * FROM accounts WHERE id = ? AND user_email = ?'
-  ).bind(accountId, c.get("userEmail")).first();
+  ).bind(accountId, c.get("userEmail")).first() as AccountRow | null;
   if (!account) return c.json({ error: 'Account not found' }, 404);
 
   // Use pre-fetched data if available, otherwise run live probes
@@ -2195,10 +2395,153 @@ app.post('/api/public/:token/research', async (c) => {
 });
 
 // ══════════════════════════════════════════════════════════════════
+// CONTACTS — People linked to accounts
+// ══════════════════════════════════════════════════════════════════
+
+// List contacts for an account
+app.get('/api/contacts/:accountId', async (c) => {
+  const email = c.get('userEmail');
+  const accountId = c.req.param('accountId');
+  const contacts = await c.env.DB.prepare(
+    'SELECT * FROM contacts WHERE account_id = ? AND user_email = ? ORDER BY is_primary DESC, last_name ASC'
+  ).bind(accountId, email).all();
+  return c.json(contacts.results);
+});
+
+// Create contact
+app.post('/api/contacts', async (c) => {
+  const email = c.get('userEmail');
+  const { accountId, firstName, lastName, contactEmail, title, phone, linkedinUrl, role, isPrimary } =
+    await c.req.json<{ accountId: number; firstName: string; lastName: string; contactEmail: string; title?: string; phone?: string; linkedinUrl?: string; role?: string; isPrimary?: boolean }>();
+
+  if (!accountId || !contactEmail) return c.json({ error: 'accountId and contactEmail are required' }, 400);
+
+  // Verify account ownership
+  const account = await c.env.DB.prepare('SELECT id FROM accounts WHERE id = ? AND user_email = ?').bind(accountId, email).first();
+  if (!account) return c.json({ error: 'Account not found' }, 404);
+
+  const result = await c.env.DB.prepare(
+    'INSERT INTO contacts (account_id, first_name, last_name, email, title, phone, linkedin_url, role, is_primary, user_email) VALUES (?,?,?,?,?,?,?,?,?,?)'
+  ).bind(accountId, firstName || '', lastName || '', contactEmail, title || null, phone || null, linkedinUrl || null, role || null, isPrimary ? 1 : 0, email).run();
+
+  return c.json({ success: true, id: result.meta?.last_row_id });
+});
+
+// Update contact
+app.put('/api/contacts/:id', async (c) => {
+  const email = c.get('userEmail');
+  const id = c.req.param('id');
+  const { firstName, lastName, contactEmail, title, phone, linkedinUrl, role, isPrimary } =
+    await c.req.json<{ firstName?: string; lastName?: string; contactEmail?: string; title?: string; phone?: string; linkedinUrl?: string; role?: string; isPrimary?: boolean }>();
+
+  const existing = await c.env.DB.prepare('SELECT id FROM contacts WHERE id = ? AND user_email = ?').bind(id, email).first();
+  if (!existing) return c.json({ error: 'Contact not found' }, 404);
+
+  await c.env.DB.prepare(
+    'UPDATE contacts SET first_name = COALESCE(?, first_name), last_name = COALESCE(?, last_name), email = COALESCE(?, email), title = COALESCE(?, title), phone = COALESCE(?, phone), linkedin_url = COALESCE(?, linkedin_url), role = COALESCE(?, role), is_primary = COALESCE(?, is_primary) WHERE id = ? AND user_email = ?'
+  ).bind(firstName ?? null, lastName ?? null, contactEmail ?? null, title ?? null, phone ?? null, linkedinUrl ?? null, role ?? null, isPrimary !== undefined ? (isPrimary ? 1 : 0) : null, id, email).run();
+
+  return c.json({ success: true });
+});
+
+// Delete contact
+app.delete('/api/contacts/:id', async (c) => {
+  const email = c.get('userEmail');
+  await c.env.DB.prepare('DELETE FROM contacts WHERE id = ? AND user_email = ?').bind(c.req.param('id'), email).run();
+  return c.json({ success: true });
+});
+
+// Bulk import contacts for an account (e.g., from Salesforce)
+app.post('/api/contacts/import/:accountId', async (c) => {
+  const email = c.get('userEmail');
+  const accountId = c.req.param('accountId');
+  const { contacts } = await c.req.json<{ contacts: Array<{ firstName: string; lastName: string; email: string; title?: string; phone?: string; role?: string; salesforceId?: string }> }>();
+
+  const account = await c.env.DB.prepare('SELECT id FROM accounts WHERE id = ? AND user_email = ?').bind(accountId, email).first();
+  if (!account) return c.json({ error: 'Account not found' }, 404);
+  if (!contacts?.length) return c.json({ error: 'No contacts provided' }, 400);
+
+  let imported = 0;
+  for (const ct of contacts.slice(0, 100)) { // Max 100 per import
+    try {
+      await c.env.DB.prepare(
+        'INSERT INTO contacts (account_id, first_name, last_name, email, title, phone, role, salesforce_id, user_email) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING'
+      ).bind(accountId, ct.firstName || '', ct.lastName || '', ct.email, ct.title || null, ct.phone || null, ct.role || null, ct.salesforceId || null, email).run();
+      imported++;
+    } catch (e) { console.error('Contact import failed:', e); }
+  }
+
+  return c.json({ success: true, imported, total: contacts.length });
+});
+
+// ══════════════════════════════════════════════════════════════════
+// SCHEDULED SENDS
+// ══════════════════════════════════════════════════════════════════
+
+// Schedule an email for later sending
+app.post('/api/scheduled-sends', async (c) => {
+  const email = c.get('userEmail');
+  const { accountId, contactId, messageId, campaignEmailId, toAddress, subject, body, scheduledFor } =
+    await c.req.json<{ accountId?: number; contactId?: number; messageId?: number; campaignEmailId?: number; toAddress: string; subject: string; body: string; scheduledFor: string }>();
+
+  if (!toAddress || !subject || !body || !scheduledFor) return c.json({ error: 'Missing required fields' }, 400);
+
+  const scheduledDate = new Date(scheduledFor);
+  if (isNaN(scheduledDate.getTime()) || scheduledDate <= new Date()) {
+    return c.json({ error: 'scheduledFor must be a future date/time' }, 400);
+  }
+
+  const result = await c.env.DB.prepare(
+    'INSERT INTO scheduled_sends (user_email, account_id, contact_id, message_id, campaign_email_id, to_address, subject, body, scheduled_for) VALUES (?,?,?,?,?,?,?,?,?)'
+  ).bind(email, accountId || null, contactId || null, messageId || null, campaignEmailId || null, toAddress, subject, body, scheduledFor).run();
+
+  return c.json({ success: true, id: result.meta?.last_row_id });
+});
+
+// List scheduled sends
+app.get('/api/scheduled-sends', async (c) => {
+  const email = c.get('userEmail');
+  const sends = await c.env.DB.prepare(
+    "SELECT * FROM scheduled_sends WHERE user_email = ? AND status = 'pending' ORDER BY scheduled_for ASC"
+  ).bind(email).all();
+  return c.json(sends.results);
+});
+
+// Cancel a scheduled send
+app.delete('/api/scheduled-sends/:id', async (c) => {
+  const email = c.get('userEmail');
+  await c.env.DB.prepare("UPDATE scheduled_sends SET status = 'cancelled' WHERE id = ? AND user_email = ? AND status = 'pending'")
+    .bind(c.req.param('id'), email).run();
+  return c.json({ success: true });
+});
+
+// ══════════════════════════════════════════════════════════════════
 // GMAIL AGENT — OAuth + Send
 // ══════════════════════════════════════════════════════════════════
 
-const GMAIL_SCOPES = 'https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/userinfo.email';
+const GMAIL_SCOPES = 'https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/userinfo.email';
+
+// ── Daily email send limit (per user) ──────────────────────────────
+const DAILY_EMAIL_LIMIT = 100;
+
+async function getDailyEmailCount(db: D1Database, userEmail: string): Promise<number> {
+  const row = await db.prepare(
+    "SELECT COUNT(*) as cnt FROM email_send_log WHERE user_email = ? AND sent_at >= date('now')"
+  ).bind(userEmail).first<CountResult>();
+  return row?.cnt || 0;
+}
+
+// Atomic check-and-insert: only logs the send if still under the daily limit.
+// Returns true if the send was logged (under limit), false if limit reached.
+async function tryLogEmailSend(db: D1Database, userEmail: string, recipient: string, subject: string, source: 'single' | 'campaign'): Promise<boolean> {
+  // Use INSERT ... WHERE to atomically check the limit and insert in one statement
+  const result = await db.prepare(`
+    INSERT INTO email_send_log (user_email, recipient, subject, source)
+    SELECT ?, ?, ?, ?
+    WHERE (SELECT COUNT(*) FROM email_send_log WHERE user_email = ? AND sent_at >= date('now')) < ?
+  `).bind(userEmail, recipient, subject, source, userEmail, DAILY_EMAIL_LIMIT).run();
+  return (result.meta?.changes ?? 0) > 0;
+}
 
 // Helper: get Google OAuth creds - Worker secrets first, then encrypted D1
 async function getGoogleCreds(db: D1Database, env: Bindings): Promise<{ clientId: string; clientSecret: string }> {
@@ -2219,10 +2562,15 @@ async function getGoogleCreds(db: D1Database, env: Bindings): Promise<{ clientId
 }
 
 // ── Encrypted settings (AES-GCM) ───────────────────────────────────
-const ENC_SALT = 'revflare-settings-v1'; // Combined with key name for unique derivation
+const ENC_SALT = 'revflare-settings-v1';
+// IMPORTANT: Set ENC_SECRET via `wrangler secret put ENC_SECRET` for production.
+// Without it, encryption is deterministic from source code alone.
+let _encSecret = '';
+function setEncSecret(secret?: string) { _encSecret = secret || ''; }
 
 async function deriveKey(keyName: string): Promise<CryptoKey> {
-  const raw = new TextEncoder().encode(ENC_SALT + ':' + keyName);
+  // Combine salt + secret + key name for unique, secret-dependent derivation
+  const raw = new TextEncoder().encode(ENC_SALT + ':' + _encSecret + ':' + keyName);
   const hash = await crypto.subtle.digest('SHA-256', raw);
   return crypto.subtle.importKey('raw', hash, 'AES-GCM', false, ['encrypt', 'decrypt']);
 }
@@ -2285,6 +2633,13 @@ app.get('/api/gmail/status', async (c) => {
   return c.json({ connected: true, gmailAddress: token.gmail_address, expired: token.expires_at < Date.now() / 1000 });
 });
 
+// Daily email send limit status
+app.get('/api/gmail/daily-limit', async (c) => {
+  const email = c.get('userEmail');
+  const sent = await getDailyEmailCount(c.env.DB, email);
+  return c.json({ sent, limit: DAILY_EMAIL_LIMIT, remaining: Math.max(0, DAILY_EMAIL_LIMIT - sent) });
+});
+
 // Start OAuth flow
 app.get('/api/gmail/connect', async (c) => {
   const { clientId } = await getGoogleCreds(c.env.DB, c.env);
@@ -2313,7 +2668,7 @@ app.get('/api/gmail/callback', async (c) => {
   const code = c.req.query('code');
   const stateParam = c.req.query('state') || '';
   let userEmail = c.get('userEmail');
-  try { const decoded = atob(stateParam); userEmail = decoded.split(':').slice(1).join(':'); } catch { }
+  try { const decoded = atob(stateParam); userEmail = decoded.split(':').slice(1).join(':'); } catch (e) { console.error('Operation failed:', e); }
   if (!code) return c.html('<h2>Authorization failed</h2><p>No code received.</p>');
 
   const { clientId, clientSecret } = await getGoogleCreds(c.env.DB, c.env);
@@ -2347,7 +2702,9 @@ app.get('/api/gmail/callback', async (c) => {
   });
   const profile = await profileRes.json() as any;
 
-  // Store tokens
+  // Store tokens (encrypted)
+  const encAccessToken = await encryptValue(tokens.access_token, 'gmail_access_' + userEmail);
+  const encRefreshToken = tokens.refresh_token ? await encryptValue(tokens.refresh_token, 'gmail_refresh_' + userEmail) : '';
   await c.env.DB.prepare(`
     INSERT INTO gmail_tokens (user_email, access_token, refresh_token, gmail_address, expires_at)
     VALUES (?, ?, ?, ?, ?)
@@ -2358,8 +2715,8 @@ app.get('/api/gmail/callback', async (c) => {
       expires_at = excluded.expires_at
   `).bind(
     userEmail,
-    tokens.access_token,
-    tokens.refresh_token || '',
+    encAccessToken,
+    encRefreshToken,
     profile.email || '',
     Math.floor(Date.now() / 1000) + (tokens.expires_in || 3600),
   ).run();
@@ -2376,20 +2733,26 @@ app.get('/api/gmail/callback', async (c) => {
   `);
 });
 
-// Refresh token helper
+// Refresh token helper (decrypts stored tokens, re-encrypts on refresh)
 async function refreshGmailToken(db: D1Database, userEmail: string, clientId: string, clientSecret: string): Promise<string | null> {
-  const stored = await db.prepare('SELECT * FROM gmail_tokens WHERE user_email = ?').bind(userEmail).first() as any;
+  const stored = await db.prepare('SELECT * FROM gmail_tokens WHERE user_email = ?').bind(userEmail).first() as GmailTokenRow | null;
   if (!stored || !stored.refresh_token) return null;
 
+  // Decrypt stored tokens (handles both encrypted and legacy plaintext)
+  let accessToken = await decryptValue(stored.access_token, 'gmail_access_' + userEmail);
+  if (!accessToken) accessToken = stored.access_token; // Legacy plaintext fallback
+  let refreshToken = await decryptValue(stored.refresh_token, 'gmail_refresh_' + userEmail);
+  if (!refreshToken) refreshToken = stored.refresh_token; // Legacy plaintext fallback
+
   // If not expired, return existing
-  if (stored.expires_at > Date.now() / 1000 + 60) return stored.access_token;
+  if (stored.expires_at > Date.now() / 1000 + 60) return accessToken;
 
   // Refresh
   const res = await fetch('https://oauth2.googleapis.com/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
-      refresh_token: stored.refresh_token,
+      refresh_token: refreshToken,
       client_id: clientId,
       client_secret: clientSecret,
       grant_type: 'refresh_token',
@@ -2397,10 +2760,12 @@ async function refreshGmailToken(db: D1Database, userEmail: string, clientId: st
   });
 
   if (!res.ok) return null;
-  const data = await res.json() as any;
+  const data = await res.json() as { access_token: string; expires_in?: number };
 
+  // Re-encrypt the new access token before storing
+  const encNewAccess = await encryptValue(data.access_token, 'gmail_access_' + userEmail);
   await db.prepare('UPDATE gmail_tokens SET access_token = ?, expires_at = ? WHERE user_email = ?')
-    .bind(data.access_token, Math.floor(Date.now() / 1000) + (data.expires_in || 3600), userEmail).run();
+    .bind(encNewAccess, Math.floor(Date.now() / 1000) + (data.expires_in || 3600), userEmail).run();
 
   return data.access_token;
 }
@@ -2411,6 +2776,18 @@ app.post('/api/gmail/send', async (c) => {
   const { to, subject, body, accountId, messageId } = await c.req.json<{ to: string; subject: string; body: string; accountId?: number; messageId?: number }>();
 
   if (!to || !subject || !body) return c.json({ error: 'Missing to, subject, or body' }, 400);
+
+  // ── Daily email limit check ──────────────────────────────────────
+  const dailySent = await getDailyEmailCount(c.env.DB, email);
+  if (dailySent >= DAILY_EMAIL_LIMIT) {
+    return c.json({
+      error: `Daily email limit reached (${DAILY_EMAIL_LIMIT} emails per day). This limit exists to protect your email domain reputation and prevent abuse flags. If you need a higher limit, please contact your RevFlare administrator.`,
+      code: 'DAILY_LIMIT_REACHED',
+      dailyLimit: DAILY_EMAIL_LIMIT,
+      sent: dailySent,
+      remaining: 0,
+    }, 429 as any);
+  }
 
   // Enforce approval: if messageId is provided, check that the email has been approved
   if (messageId) {
@@ -2456,11 +2833,28 @@ app.post('/api/gmail/send', async (c) => {
 
   if (!sendRes.ok) {
     const err = await sendRes.json() as any;
-    return c.json({ error: err.error?.message || 'Gmail send failed' }, sendRes.status);
+    return c.json({ error: err.error?.message || 'Gmail send failed' }, sendRes.status as any);
   }
 
+  // Log the successful send for daily limit tracking
+  await tryLogEmailSend(c.env.DB, email, to, subject, 'single');
+
   const result = await sendRes.json() as any;
-  return c.json({ success: true, messageId: result.id, threadId: result.threadId });
+
+  // Track thread/message IDs for reply detection
+  if (messageId && result.threadId) {
+    await c.env.DB.prepare(
+      'UPDATE persona_messages SET gmail_thread_id = ?, gmail_message_id = ?, sent_to = ?, sent_at = CURRENT_TIMESTAMP WHERE id = ? AND user_email = ?'
+    ).bind(result.threadId, result.id, to, messageId, email).run();
+  }
+
+  const newDailySent = dailySent + 1;
+  return c.json({
+    success: true,
+    messageId: result.id,
+    threadId: result.threadId,
+    dailyLimit: { sent: newDailySent, limit: DAILY_EMAIL_LIMIT, remaining: DAILY_EMAIL_LIMIT - newDailySent },
+  });
 });
 
 // Bulk send campaign emails
@@ -2468,6 +2862,20 @@ app.post('/api/gmail/send-campaign/:campaignId', async (c) => {
   const campaignId = c.req.param('campaignId');
   const email = c.get('userEmail');
   const { emailIds, toField } = await c.req.json<{ emailIds: number[]; toField: string }>();
+
+  // ── Daily email limit check ──────────────────────────────────────
+  const dailySent = await getDailyEmailCount(c.env.DB, email);
+  if (dailySent >= DAILY_EMAIL_LIMIT) {
+    return c.json({
+      error: `Daily email limit reached (${DAILY_EMAIL_LIMIT} emails per day). This limit exists to protect your email domain reputation and prevent abuse flags. If you need a higher limit, please contact your RevFlare administrator.`,
+      code: 'DAILY_LIMIT_REACHED',
+      dailyLimit: DAILY_EMAIL_LIMIT,
+      sent: dailySent,
+      remaining: 0,
+    }, 429 as any);
+  }
+
+  const remaining = DAILY_EMAIL_LIMIT - dailySent;
 
   // Verify campaign ownership
   const campaign = await c.env.DB.prepare('SELECT id FROM campaigns WHERE id = ? AND user_email = ?').bind(campaignId, email).first();
@@ -2483,8 +2891,11 @@ app.post('/api/gmail/send-campaign/:campaignId', async (c) => {
   const from = stored?.gmail_address || email;
 
   const results: { id: number; status: string; error?: string }[] = [];
+  let sentInThisBatch = 0;
 
-  for (const eid of emailIds.slice(0, 10)) { // Max 10 per batch
+  // Cap batch to both the 10-per-call limit AND remaining daily allowance
+  const batchLimit = Math.min(10, remaining);
+  for (const eid of emailIds.slice(0, batchLimit)) {
     const em = await c.env.DB.prepare('SELECT * FROM campaign_emails WHERE id = ? AND campaign_id = ?').bind(eid, campaignId).first() as any;
     if (!em) { results.push({ id: eid, status: 'not_found' }); continue; }
     if (em.approval_status !== 'approved') { results.push({ id: eid, status: 'not_approved', error: 'Email not approved — only approved emails can be sent' }); continue; }
@@ -2501,6 +2912,8 @@ app.post('/api/gmail/send-campaign/:campaignId', async (c) => {
       });
       if (sendRes.ok) {
         await c.env.DB.prepare('UPDATE campaign_emails SET status = ? WHERE id = ?').bind('sent', eid).run();
+        await tryLogEmailSend(c.env.DB, email, toField, em.subject || '', 'campaign');
+        sentInThisBatch++;
         results.push({ id: eid, status: 'sent' });
       } else {
         const err = await sendRes.json() as any;
@@ -2511,7 +2924,74 @@ app.post('/api/gmail/send-campaign/:campaignId', async (c) => {
     }
   }
 
-  return c.json({ results, sent: results.filter(r => r.status === 'sent').length });
+  // If batch was truncated due to daily limit, flag the skipped ones
+  if (emailIds.length > batchLimit) {
+    const skippedIds = emailIds.slice(batchLimit, 10); // IDs that would have been processed but hit the limit
+    for (const sid of skippedIds) {
+      results.push({ id: sid, status: 'skipped', error: 'Daily email limit reached — skipped to protect your email domain reputation' });
+    }
+  }
+
+  const totalSentToday = dailySent + sentInThisBatch;
+  return c.json({
+    results,
+    sent: results.filter(r => r.status === 'sent').length,
+    dailyLimit: { sent: totalSentToday, limit: DAILY_EMAIL_LIMIT, remaining: DAILY_EMAIL_LIMIT - totalSentToday },
+  });
+});
+
+// Check for email replies (polls Gmail threads we've sent)
+app.post('/api/gmail/check-replies', async (c) => {
+  const email = c.get('userEmail');
+  const { clientId, clientSecret } = await getGoogleCreds(c.env.DB, c.env);
+  if (!clientId || !clientSecret) return c.json({ error: 'Gmail not configured' }, 500);
+
+  const accessToken = await refreshGmailToken(c.env.DB, email, clientId, clientSecret);
+  if (!accessToken) return c.json({ error: 'Gmail not connected' }, 401);
+
+  // Get all sent messages with thread IDs that haven't been marked as replied
+  const sentMessages = await c.env.DB.prepare(
+    "SELECT id, gmail_thread_id FROM persona_messages WHERE user_email = ? AND gmail_thread_id IS NOT NULL AND replied = 0"
+  ).bind(email).all();
+
+  let repliesFound = 0;
+  for (const msg of (sentMessages.results as any[]).slice(0, 25)) { // Check max 25 threads per call
+    try {
+      const threadRes = await fetch(
+        `https://gmail.googleapis.com/gmail/v1/users/me/threads/${msg.gmail_thread_id}?format=metadata&metadataHeaders=From`,
+        { headers: { 'Authorization': `Bearer ${accessToken}` } }
+      );
+      if (!threadRes.ok) continue;
+      const thread = await threadRes.json() as any;
+      // If thread has more than 1 message, someone replied
+      if (thread.messages && thread.messages.length > 1) {
+        await c.env.DB.prepare('UPDATE persona_messages SET replied = 1 WHERE id = ?').bind(msg.id).run();
+        repliesFound++;
+      }
+    } catch (e) { console.error('Reply check failed for thread:', msg.gmail_thread_id, e); }
+  }
+
+  // Same for campaign emails
+  const sentCampaignEmails = await c.env.DB.prepare(
+    "SELECT id, gmail_thread_id FROM campaign_emails WHERE gmail_thread_id IS NOT NULL AND replied = 0 AND campaign_id IN (SELECT id FROM campaigns WHERE user_email = ?)"
+  ).bind(email).all();
+
+  for (const msg of (sentCampaignEmails.results as any[]).slice(0, 25)) {
+    try {
+      const threadRes = await fetch(
+        `https://gmail.googleapis.com/gmail/v1/users/me/threads/${msg.gmail_thread_id}?format=metadata&metadataHeaders=From`,
+        { headers: { 'Authorization': `Bearer ${accessToken}` } }
+      );
+      if (!threadRes.ok) continue;
+      const thread = await threadRes.json() as any;
+      if (thread.messages && thread.messages.length > 1) {
+        await c.env.DB.prepare('UPDATE campaign_emails SET replied = 1 WHERE id = ?').bind(msg.id).run();
+        repliesFound++;
+      }
+    } catch (e) { console.error('Campaign reply check failed:', e); }
+  }
+
+  return c.json({ success: true, repliesFound });
 });
 
 // Disconnect Gmail
@@ -2644,7 +3124,9 @@ app.post('/api/campaigns/:id/generate', async (c) => {
   const generatedIds = new Set(alreadyGenerated.results.map((r: any) => r.account_id));
 
   const pendingIds = accountIds.filter(id => !generatedIds.has(id));
-  const batchIds = generateAll ? pendingIds : pendingIds.slice(0, 2); // all remaining or 2 at a time
+  // Cap batch size: max 20 accounts per request to avoid Worker CPU timeout (~30s per account with probes + AI)
+  const MAX_CAMPAIGN_BATCH = 20;
+  const batchIds = generateAll ? pendingIds.slice(0, MAX_CAMPAIGN_BATCH) : pendingIds.slice(0, 2);
 
   if (!batchIds.length) {
     await c.env.DB.prepare('UPDATE campaigns SET status = ? WHERE id = ?').bind('complete', campaignId).run();
@@ -2723,7 +3205,7 @@ app.post('/api/campaigns/:id/generate', async (c) => {
             } else if (pg.key === 'ir') {
               result.ir = text.slice(0, 1500);
             }
-          } catch (_) {}
+          } catch (e) { console.error('Operation failed:', e); }
         }
         return result;
       })(),
@@ -2951,7 +3433,7 @@ app.post('/api/campaigns/:id/regenerate/:accountId', async (c) => {
           } else if (pg.key === 'ir') {
             result.ir = text.slice(0, 1500);
           }
-        } catch (_) {}
+        } catch (e) { console.error('Operation failed:', e); }
       }
       return result;
     })(),
@@ -3061,7 +3543,7 @@ async function getNewsApiKeys(db: D1Database): Promise<{ newsApi: string; gNews:
     if ((k1 as any)?.value) keys.newsApi = await decryptValue((k1 as any).value, 'news_api_key');
     if ((k2 as any)?.value) keys.gNews = await decryptValue((k2 as any).value, 'gnews_api_key');
     if ((k3 as any)?.value) keys.mediaStack = await decryptValue((k3 as any).value, 'mediastack_api_key');
-  } catch {}
+  } catch (e) { console.error('Operation failed:', e); }
   return keys;
 }
 
@@ -3151,9 +3633,15 @@ STRUCTURE:
 // ── Lead Scoring ───────────────────────────────────────────────────
 app.get('/api/lead-scores', async (c) => {
   const email = c.get('userEmail');
-  const limit = parseInt(c.req.query('limit') || '20');
+  const limit = Math.min(parseInt(c.req.query('limit') || '20'), 100);
+
+  // Optimized: only fetch columns needed for scoring, use index on (user_email, total_it_spend)
   const accounts = await c.env.DB.prepare(
-    'SELECT * FROM accounts WHERE user_email = ? ORDER BY total_it_spend DESC LIMIT 200'
+    `SELECT id, account_name, industry, total_it_spend, current_monthly_fee, annual_revenue,
+            employees, cdn_primary, cdn_spend, security_primary, security_spend, dns_primary,
+            cloud_hosting_primary, account_status, activities_last_30, opportunities_open,
+            billing_country, account_segment
+     FROM accounts WHERE user_email = ? ORDER BY total_it_spend DESC LIMIT 200`
   ).bind(email).all();
 
   const scored = accounts.results.map((a: any) => {
@@ -3161,10 +3649,13 @@ app.get('/api/lead-scores', async (c) => {
     return { id: a.id, account_name: a.account_name, industry: a.industry, score, factors, total_it_spend: a.total_it_spend, current_monthly_fee: a.current_monthly_fee, cdn_primary: a.cdn_primary, security_primary: a.security_primary };
   }).sort((a: any, b: any) => b.score - a.score).slice(0, limit);
 
-  // Persist scores
-  for (const s of scored) {
-    await c.env.DB.prepare('INSERT INTO lead_scores (account_id, score, factors, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP) ON CONFLICT(account_id) DO UPDATE SET score=excluded.score, factors=excluded.factors, updated_at=CURRENT_TIMESTAMP')
-      .bind(s.id, s.score, JSON.stringify(s.factors)).run();
+  // Persist scores using batch for efficiency
+  if (scored.length) {
+    const stmts = scored.map(s =>
+      c.env.DB.prepare('INSERT INTO lead_scores (account_id, score, factors, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP) ON CONFLICT(account_id) DO UPDATE SET score=excluded.score, factors=excluded.factors, updated_at=CURRENT_TIMESTAMP')
+        .bind(s.id, s.score, JSON.stringify(s.factors))
+    );
+    await c.env.DB.batch(stmts);
   }
 
   return c.json(scored);
@@ -3183,20 +3674,36 @@ app.get('/api/roi/:accountId', async (c) => {
   return c.json(calculateROI(account));
 });
 
-// ── Account Lookalikes ─────────────────────────────────────────────
+// ── Account Lookalikes (pre-filtered by industry/segment) ──────────
 app.get('/api/lookalikes/:accountId', async (c) => {
   const email = c.get('userEmail');
-  const refAccount = await c.env.DB.prepare('SELECT * FROM accounts WHERE id = ? AND user_email = ?').bind(c.req.param('accountId'), email).first();
+  const refAccount = await c.env.DB.prepare('SELECT * FROM accounts WHERE id = ? AND user_email = ?').bind(c.req.param('accountId'), email).first() as AccountRow | null;
   if (!refAccount) return c.json({ error: 'Account not found' }, 404);
 
-  const allAccounts = await c.env.DB.prepare('SELECT * FROM accounts WHERE user_email = ? AND id != ?').bind(email, refAccount.id).all();
-  const scored = allAccounts.results.map((a: any) => ({
+  // Pre-filter: prioritize same industry/segment, then fall back to broader set
+  let candidates = await c.env.DB.prepare(
+    `SELECT id, account_name, industry, total_it_spend, employees, cdn_primary, security_primary,
+            billing_country, account_segment, cdn_spend, security_spend, annual_revenue
+     FROM accounts WHERE user_email = ? AND id != ? AND (industry = ? OR account_segment = ?)
+     ORDER BY total_it_spend DESC LIMIT 100`
+  ).bind(email, refAccount.id, refAccount.industry || '', refAccount.account_segment || '').all();
+
+  // If not enough candidates from same industry, broaden
+  if (candidates.results.length < 10) {
+    candidates = await c.env.DB.prepare(
+      `SELECT id, account_name, industry, total_it_spend, employees, cdn_primary, security_primary,
+              billing_country, account_segment, cdn_spend, security_spend, annual_revenue
+       FROM accounts WHERE user_email = ? AND id != ? ORDER BY total_it_spend DESC LIMIT 200`
+    ).bind(email, refAccount.id).all();
+  }
+
+  const scored = candidates.results.map((a: any) => ({
     id: a.id, account_name: a.account_name, industry: a.industry, total_it_spend: a.total_it_spend,
     employees: a.employees, cdn_primary: a.cdn_primary, security_primary: a.security_primary,
     billing_country: a.billing_country, similarity: scoreSimilarity(a, refAccount),
   })).filter((a: any) => a.similarity > 20).sort((a: any, b: any) => b.similarity - a.similarity).slice(0, 20);
 
-  return c.json({ reference: { id: refAccount.id, account_name: (refAccount as any).account_name }, lookalikes: scored });
+  return c.json({ reference: { id: refAccount.id, account_name: refAccount.account_name }, lookalikes: scored });
 });
 
 // ── Meeting Prep ───────────────────────────────────────────────────
@@ -3544,7 +4051,7 @@ async function getSFCreds(db: D1Database): Promise<{ clientId: string; clientSec
     const r2 = await db.prepare("SELECT value FROM app_settings WHERE key = 'sf_client_secret'").first() as any;
     if (r1?.value) cid = await decryptValue(r1.value, 'sf_client_id');
     if (r2?.value) csec = await decryptValue(r2.value, 'sf_client_secret');
-  } catch {}
+  } catch (e) { console.error('Operation failed:', e); }
   return { clientId: cid, clientSecret: csec };
 }
 
@@ -3564,7 +4071,7 @@ app.get('/api/salesforce/callback', async (c) => {
   const code = c.req.query('code');
   const stateParam = c.req.query('state') || '';
   let email = c.get('userEmail');
-  try { email = atob(stateParam).split(':').slice(1).join(':'); } catch {}
+  try { email = atob(stateParam).split(':').slice(1).join(':'); } catch (e) { console.error('Operation failed:', e); }
 
   const { clientId, clientSecret } = await getSFCreds(c.env.DB);
   if (!code || !clientId || !clientSecret) return c.html('<h2>Salesforce auth failed</h2>');
@@ -3578,8 +4085,11 @@ app.get('/api/salesforce/callback', async (c) => {
   if (!tokenRes.ok) return c.html('<h2>Token exchange failed</h2><pre>' + await tokenRes.text() + '</pre>');
   const tokens = await tokenRes.json() as any;
 
+  // Encrypt tokens before storing
+  const encSfAccess = await encryptValue(tokens.access_token, 'sf_access_' + email);
+  const encSfRefresh = tokens.refresh_token ? await encryptValue(tokens.refresh_token, 'sf_refresh_' + email) : '';
   await c.env.DB.prepare('INSERT INTO salesforce_tokens (user_email, instance_url, access_token, refresh_token, expires_at) VALUES (?,?,?,?,?) ON CONFLICT(user_email) DO UPDATE SET instance_url=excluded.instance_url, access_token=excluded.access_token, refresh_token=COALESCE(excluded.refresh_token,salesforce_tokens.refresh_token), expires_at=excluded.expires_at')
-    .bind(email, tokens.instance_url, tokens.access_token, tokens.refresh_token || '', Math.floor(Date.now()/1000) + 7200).run();
+    .bind(email, tokens.instance_url, encSfAccess, encSfRefresh, Math.floor(Date.now()/1000) + 7200).run();
 
   return c.html('<html><body style="background:#08090a;color:#f7f8f8;font-family:Inter,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh"><div style="text-align:center"><h2 style="color:#34d399">Salesforce Connected!</h2><p>You can close this window.</p><script>setTimeout(function(){window.close()},2000)</script></div></body></html>');
 });
@@ -3589,18 +4099,27 @@ app.get('/api/salesforce/status', async (c) => {
   return c.json({ connected: !!token, instanceUrl: token?.instance_url || '' });
 });
 
+// Helper: decrypt Salesforce access token (handles legacy plaintext)
+async function decryptSFToken(stored: SalesforceTokenRow): Promise<string> {
+  let token = await decryptValue(stored.access_token, 'sf_access_' + stored.user_email);
+  if (!token) token = stored.access_token; // Legacy plaintext fallback
+  return token;
+}
+
 // Push research/email as SF Task
 app.post('/api/salesforce/push-activity', async (c) => {
   const email = c.get('userEmail');
-  const { accountName, subject, body, type } = await c.req.json<any>();
-  const sf = await c.env.DB.prepare('SELECT * FROM salesforce_tokens WHERE user_email = ?').bind(email).first() as any;
+  const { accountName, subject, body, type } = await c.req.json<{ accountName: string; subject?: string; body?: string; type?: string }>();
+  const sf = await c.env.DB.prepare('SELECT * FROM salesforce_tokens WHERE user_email = ?').bind(email).first() as SalesforceTokenRow | null;
   if (!sf) return c.json({ error: 'Salesforce not connected' }, 401);
+
+  const sfAccessToken = await decryptSFToken(sf);
 
   // Search for the account in SF
   // Escape SOQL special characters to prevent injection
   const safeName = accountName.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/%/g, '\\%').replace(/_/g, '\\_');
   const searchRes = await fetch(`${sf.instance_url}/services/data/v59.0/query?q=${encodeURIComponent(`SELECT Id FROM Account WHERE Name = '${safeName}'`)}`, {
-    headers: { 'Authorization': `Bearer ${sf.access_token}` },
+    headers: { 'Authorization': `Bearer ${sfAccessToken}` },
   });
   const searchData = await searchRes.json() as any;
   const accountId = searchData.records?.[0]?.Id;
@@ -3611,7 +4130,7 @@ app.post('/api/salesforce/push-activity', async (c) => {
 
   const createRes = await fetch(`${sf.instance_url}/services/data/v59.0/sobjects/Task`, {
     method: 'POST',
-    headers: { 'Authorization': `Bearer ${sf.access_token}`, 'Content-Type': 'application/json' },
+    headers: { 'Authorization': `Bearer ${sfAccessToken}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(task),
   });
 
@@ -3712,7 +4231,7 @@ app.get('/api/search', async (c) => {
         }
       }
       scored.sort((a: any, b: any) => b.score - a.score);
-    } catch {}
+    } catch (e) { console.error('Operation failed:', e); }
   }
 
   return c.json({ results: scored.slice(0, 20), query, totalIndexed: cache.results.length });
@@ -3841,7 +4360,7 @@ Keep output compact. ONLY the JSON array.`;
         }
         aiOpps = [];
         for (const m of objMatches) {
-          try { aiOpps.push(JSON.parse(m)); } catch {}
+          try { aiOpps.push(JSON.parse(m)); } catch (e) { console.error('Operation failed:', e); }
         }
       }
     } else {
@@ -3852,7 +4371,7 @@ Keep output compact. ONLY the JSON array.`;
       }
       aiOpps = [];
       for (const m of objMatches) {
-        try { aiOpps.push(JSON.parse(m)); } catch {}
+        try { aiOpps.push(JSON.parse(m)); } catch (e) { console.error('Operation failed:', e); }
       }
     }
 
@@ -4033,16 +4552,73 @@ Based on the account's spend profile, estimate potential savings and efficiency 
   return c.json({ detected, accountName: account.account_name });
 });
 
-// ── Scheduled: Nightly change detection + threat matching ──────────
+// ── Scheduled: Nightly change detection + threat matching + sends + sync ──
 const worker = {
   fetch: app.fetch,
   async scheduled(event: ScheduledEvent, env: Bindings, ctx: ExecutionContext) {
-    // Get all unique user emails
+    // Initialize encryption secret for cron context
+    setEncSecret(env.ENC_SECRET);
+
+    // ── 1. Pre-populate threat intel cache ─────────────────────────
+    try {
+      console.log('[Cron] Pre-populating threat intel cache...');
+      await fetchThreatIntelligence(3, undefined, env.THREAT_CACHE);
+      console.log('[Cron] Threat intel cache populated');
+    } catch (e) { console.error('[Cron] Threat intel pre-population failed:', e); }
+
+    // ── 2. Process scheduled sends ─────────────────────────────────
+    try {
+      const pendingSends = await env.DB.prepare(
+        "SELECT * FROM scheduled_sends WHERE status = 'pending' AND scheduled_for <= datetime('now') LIMIT 50"
+      ).all();
+
+      for (const send of pendingSends.results as any[]) {
+        try {
+          const { clientId, clientSecret } = await getGoogleCreds(env.DB, env);
+          if (!clientId || !clientSecret) { throw new Error('Gmail not configured'); }
+
+          const accessToken = await refreshGmailToken(env.DB, send.user_email, clientId, clientSecret);
+          if (!accessToken) { throw new Error('Gmail token expired'); }
+
+          // Check daily limit
+          const dailySent = await getDailyEmailCount(env.DB, send.user_email);
+          if (dailySent >= DAILY_EMAIL_LIMIT) {
+            await env.DB.prepare("UPDATE scheduled_sends SET status = 'failed', error = 'Daily email limit reached' WHERE id = ?").bind(send.id).run();
+            continue;
+          }
+
+          const stored = await env.DB.prepare('SELECT gmail_address FROM gmail_tokens WHERE user_email = ?').bind(send.user_email).first() as any;
+          const from = stored?.gmail_address || send.user_email;
+
+          const rawEmail = [`From: ${from}`, `To: ${send.to_address}`, `Subject: ${send.subject}`, 'Content-Type: text/plain; charset=utf-8', '', send.body].join('\r\n');
+          const encoded = btoa(unescape(encodeURIComponent(rawEmail))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+          const sendRes = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ raw: encoded }),
+          });
+
+          if (sendRes.ok) {
+            await tryLogEmailSend(env.DB, send.user_email, send.to_address, send.subject, 'single');
+            await env.DB.prepare("UPDATE scheduled_sends SET status = 'sent' WHERE id = ?").bind(send.id).run();
+            console.log(`[Cron] Scheduled send ${send.id} delivered to ${send.to_address}`);
+          } else {
+            const err = await sendRes.json() as any;
+            await env.DB.prepare("UPDATE scheduled_sends SET status = 'failed', error = ? WHERE id = ?").bind(err.error?.message || 'Send failed', send.id).run();
+          }
+        } catch (e: any) {
+          await env.DB.prepare("UPDATE scheduled_sends SET status = 'failed', error = ? WHERE id = ?").bind(e.message || 'Unknown error', send.id).run();
+          console.error(`[Cron] Scheduled send ${send.id} failed:`, e);
+        }
+      }
+    } catch (e) { console.error('[Cron] Scheduled sends processing failed:', e); }
+
+    // ── 3. Infrastructure change detection + threat matching ────────
     const users = await env.DB.prepare('SELECT DISTINCT user_email FROM accounts WHERE user_email != ""').all();
 
     for (const user of users.results as any[]) {
       const email = user.user_email;
-      // Get top 50 accounts by IT spend for this user
       const accounts = await env.DB.prepare('SELECT id, account_name, website, website_domain, industry, billing_country FROM accounts WHERE user_email = ? ORDER BY total_it_spend DESC LIMIT 50').bind(email).all();
 
       for (const a of accounts.results as any[]) {
@@ -4051,9 +4627,7 @@ const worker = {
         const clean = domain.replace(/^https?:\/\//, '').replace(/\/.*/, '');
 
         try {
-          // Quick probe (no Puppeteer — just HTTP + DNS for speed)
           const [probe, dns] = await Promise.all([probeDomain(clean), lookupDNS(clean)]);
-
           const lastProbe = await env.DB.prepare('SELECT * FROM probe_history WHERE account_id = ? ORDER BY created_at DESC LIMIT 1').bind(a.id).first() as any;
 
           await env.DB.prepare('INSERT INTO probe_history (account_id, cdn_detected, dns_provider, security_headers, server_info, probe_hash) VALUES (?,?,?,?,?,?)')
@@ -4069,21 +4643,87 @@ const worker = {
                 .bind(a.id, 'dns_change', 'DNS Change: ' + a.account_name, lastProbe.dns_provider + ' → ' + dns.dnsProvider, 'high', email).run();
             }
           }
-        } catch (_) {}
+        } catch (e) { console.error(`[Cron] Probe failed for ${a.account_name}:`, e); }
       }
 
-      // Match threat intel to this user's accounts
+      // Match threat intel
       try {
-        const threats = await fetchThreatIntelligence(1, undefined, env.THREAT_CACHE); // last 24h
+        const threats = await fetchThreatIntelligence(1, undefined, env.THREAT_CACHE);
         for (const a of accounts.results as any[]) {
           const matched = matchIncidentsToAccount(threats.incidents, a);
-          for (const inc of matched.slice(0, 2)) { // Max 2 alerts per account
+          for (const inc of matched.slice(0, 2)) {
             await env.DB.prepare('INSERT INTO alerts (account_id, alert_type, title, detail, severity, user_email) VALUES (?,?,?,?,?,?)')
               .bind(a.id, 'threat_match', 'Threat: ' + inc.title.slice(0, 80), 'Matched to ' + a.account_name + ' (' + (a.industry || '') + '). Score: ' + inc.score, inc.score > 80 ? 'critical' : 'high', email).run();
           }
         }
-      } catch (_) {}
+      } catch (e) { console.error(`[Cron] Threat matching failed for ${email}:`, e); }
+
+      // ── 4. Check for email replies (per user) ────────────────────
+      try {
+        const { clientId, clientSecret } = await getGoogleCreds(env.DB, env);
+        if (clientId && clientSecret) {
+          const accessToken = await refreshGmailToken(env.DB, email, clientId, clientSecret);
+          if (accessToken) {
+            const sentMsgs = await env.DB.prepare(
+              "SELECT id, gmail_thread_id FROM persona_messages WHERE user_email = ? AND gmail_thread_id IS NOT NULL AND replied = 0 LIMIT 20"
+            ).bind(email).all();
+
+            for (const msg of sentMsgs.results as any[]) {
+              try {
+                const threadRes = await fetch(
+                  `https://gmail.googleapis.com/gmail/v1/users/me/threads/${msg.gmail_thread_id}?format=metadata`,
+                  { headers: { 'Authorization': `Bearer ${accessToken}` } }
+                );
+                if (threadRes.ok) {
+                  const thread = await threadRes.json() as any;
+                  if (thread.messages?.length > 1) {
+                    await env.DB.prepare('UPDATE persona_messages SET replied = 1 WHERE id = ?').bind(msg.id).run();
+                  }
+                }
+              } catch (e) { console.error('[Cron] Reply check failed:', e); }
+            }
+          }
+        }
+      } catch (e) { console.error(`[Cron] Reply check failed for ${email}:`, e); }
+
+      // ── 5. Auto-sync sent emails to Salesforce ───────────────────
+      try {
+        const sfToken = await env.DB.prepare('SELECT * FROM salesforce_tokens WHERE user_email = ?').bind(email).first() as SalesforceTokenRow | null;
+        if (sfToken) {
+          const sfAccessToken = await decryptSFToken(sfToken);
+          // Find recently sent emails not yet synced (sent in last 24h)
+          const recentSent = await env.DB.prepare(
+            "SELECT pm.id, pm.subject, pm.content, pm.sent_to, a.account_name FROM persona_messages pm JOIN accounts a ON pm.account_id = a.id WHERE pm.user_email = ? AND pm.sent_at IS NOT NULL AND pm.sent_at >= datetime('now', '-1 day') LIMIT 10"
+          ).bind(email).all();
+
+          for (const msg of recentSent.results as any[]) {
+            try {
+              const safeName = (msg.account_name || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+              const searchRes = await fetch(`${sfToken.instance_url}/services/data/v59.0/query?q=${encodeURIComponent(`SELECT Id FROM Account WHERE Name = '${safeName}'`)}`, {
+                headers: { 'Authorization': `Bearer ${sfAccessToken}` },
+              });
+              const searchData = await searchRes.json() as any;
+              const sfAccountId = searchData.records?.[0]?.Id;
+
+              const task: any = {
+                Subject: 'RevFlare Email: ' + (msg.subject || '').slice(0, 200),
+                Description: (msg.content || '').slice(0, 32000),
+                Status: 'Completed', Priority: 'Normal', Type: 'Email',
+              };
+              if (sfAccountId) task.WhatId = sfAccountId;
+
+              await fetch(`${sfToken.instance_url}/services/data/v59.0/sobjects/Task`, {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${sfAccessToken}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify(task),
+              });
+            } catch (e) { console.error('[Cron] SF sync failed for message:', msg.id, e); }
+          }
+        }
+      } catch (e) { console.error(`[Cron] SF auto-sync failed for ${email}:`, e); }
     }
+
+    console.log('[Cron] Nightly job complete');
   },
 };
 

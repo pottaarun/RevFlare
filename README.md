@@ -42,11 +42,14 @@
 - **Track lead scores**, alerts, team activity, playbooks, and semantic search across all generated intel
 - **Monitor usage analytics** with page/tab visit tracking, daily trends, per-user activity, and tab popularity rankings
 - **Review and approve emails before sending** with a full approval workflow — each generated email shows recipient details (account name, website, industry, location, IT spend) and must be explicitly approved before it can be sent via Gmail
-- **Send emails directly via Gmail** through OAuth integration
-- **Sync with Salesforce** via OAuth to push activities and pull opportunities
+- **Send emails directly via Gmail** through OAuth integration, with a **100 email/day limit per user** to protect domain reputation
+- **Track email replies** via Gmail API thread polling, with automated nightly checks
+- **Schedule emails** for future delivery, processed automatically by cron
+- **Manage contacts** linked to accounts, with bulk import from Salesforce
+- **Sync with Salesforce** via OAuth to push activities and pull opportunities, with **automatic nightly sync** of sent emails
 - **Share account intelligence** via tokenized public links that bypass Cloudflare Access
 
-The entire application is a **single Cloudflare Worker** (~3,700 lines of TypeScript) with a **vanilla JavaScript SPA** frontend (~3,000 lines). No React, no build step for the frontend, no external backend.
+The entire application is a **single Cloudflare Worker** (~4,700 lines of TypeScript) with a **vanilla JavaScript SPA** frontend (~3,700 lines). No React, no build step for the frontend, no external backend.
 
 **Live URL**: https://revflare.arunpotta1024.workers.dev
 **GitHub**: https://github.com/pottaarun/RevFlare
@@ -110,7 +113,7 @@ The entire application is a **single Cloudflare Worker** (~3,700 lines of TypeSc
 | Service | Binding | Purpose |
 |---------|---------|---------|
 | **Workers** | (runtime) | Application server |
-| **D1** | `DB` | SQLite database (18 tables) |
+| **D1** | `DB` | SQLite database (21 tables) |
 | **Workers AI** | `AI` | LLM inference (3 models) |
 | **Browser Rendering** | `BROWSER` | Headless Chromium via @cloudflare/puppeteer |
 | **Workers KV** | `THREAT_CACHE` | Threat intel cache + URL dedup |
@@ -124,6 +127,10 @@ The entire application is a **single Cloudflare Worker** (~3,700 lines of TypeSc
 ### Worker Secrets (via `wrangler secret put`)
 | Variable | Required | Purpose |
 |----------|----------|---------|
+| `ENC_SECRET` | **Yes** | Secret key for AES-GCM encryption derivation. Without this, encryption is deterministic from source alone. |
+| `CF_ACCESS_TEAM_DOMAIN` | **Yes** | e.g. `myteam.cloudflareaccess.com` — used to fetch JWKS for JWT signature verification |
+| `CF_ACCESS_AUD` | Recommended | Application Audience (AUD) tag from Cloudflare Access — validates JWT audience claim |
+| `DEV_MODE` | No | Set to `true` only for local dev to enable `_user` query param fallback |
 | `GOOGLE_CLIENT_ID` | Optional | Google OAuth for Gmail |
 | `GOOGLE_CLIENT_SECRET` | Optional | Google OAuth for Gmail |
 | `CF_API_TOKEN` | Optional | Cloudflare Radar API |
@@ -149,12 +156,15 @@ Worker secrets always take priority over D1 settings.
 |-------|---------|-------------|
 | `accounts` | Salesforce data (40+ columns) | account_name, website, industry, IT spend breakdown by category, competitor products, user_email |
 | `research_reports` | AI research output | account_id, report_type, content, user_email |
-| `persona_messages` | Generated emails | account_id, persona, message_type, subject, content, approval_status, user_email |
+| `persona_messages` | Generated emails | account_id, persona, message_type, subject, content, approval_status, gmail_thread_id, replied, user_email |
 | `campaigns` | Mass email campaigns | name, theme, persona, accountIds (JSON), status, generated count |
-| `campaign_emails` | Individual campaign emails | campaign_id, account_id, subject, content, status, approval_status |
+| `campaign_emails` | Individual campaign emails | campaign_id, account_id, subject, content, status, approval_status, gmail_thread_id, replied |
+| `contacts` | **People linked to accounts** | account_id, first_name, last_name, email, title, phone, role, is_primary, salesforce_id, user_email |
+| `email_send_log` | **Daily send limit tracking** | user_email, recipient, subject, source, sent_at |
+| `scheduled_sends` | **Future email delivery** | user_email, to_address, subject, body, scheduled_for, status |
 | `share_tokens` | Public share links | token (32-char UUID), account_id, created_by, expires_at (30-day default) |
-| `gmail_tokens` | OAuth tokens | user_email (PK), access_token, refresh_token, gmail_address |
-| `salesforce_tokens` | SF OAuth tokens | user_email (PK), instance_url, access_token, refresh_token |
+| `gmail_tokens` | OAuth tokens (encrypted) | user_email (PK), access_token, refresh_token, gmail_address |
+| `salesforce_tokens` | SF OAuth tokens (encrypted) | user_email (PK), instance_url, access_token, refresh_token |
 | `app_settings` | Encrypted config | key (PK), value (AES-256-GCM encrypted) |
 | `opportunities` | Pipeline tracking | account_id, account_name, industry, country, acv, stage, notes, user_email |
 | `lead_scores` | Cached lead scores | account_id (PK), score, factors (JSON) |
@@ -167,7 +177,7 @@ Worker secrets always take priority over D1 settings.
 | `vectorize_cache` | Search index | content_type, content_id, content_text, account_id |
 | `page_views` | Usage analytics | page, tab, account_id, user_email, created_at |
 
-All data is **user-scoped** via `user_email` column.
+All data is **user-scoped** via `user_email` column. **21 tables** total.
 
 ---
 
@@ -175,29 +185,34 @@ All data is **user-scoped** via `user_email` column.
 
 ### Authentication
 1. **Cloudflare Access** injects JWT headers on every request
-2. Worker middleware extracts email from `Cf-Access-Jwt-Assertion` or `Cf-Access-Authenticated-User-Email`
-3. `_user` query parameter fallback is restricted to local dev only (blocked when `Cf-Connecting-Ip` or `Cf-Ray` headers present)
-4. Unauthenticated production requests return 401
-5. All queries include `WHERE user_email = ?`
-6. Public share endpoints (`/api/public/*`) bypass auth
+2. Worker middleware **verifies JWT signatures** against Access JWKS (RS256), validates expiry and audience claims
+3. Falls back to `Cf-Access-Authenticated-User-Email` header if JWT not present
+4. `_user` query parameter fallback requires explicit `DEV_MODE=true` env var (not header sniffing)
+5. Unauthenticated production requests return 401
+6. All queries include `WHERE user_email = ?`
+7. Public share endpoints (`/api/public/*`) bypass auth
 
-### Security Measures (27 vulnerabilities audited and remediated)
+### Security Measures
 
 | Protection | Implementation |
 |-----------|----------------|
-| **Auth bypass prevention** | `_user` param blocked in production via Cloudflare header detection |
-| **XSS protection** | Global `esc()` HTML entity escaping; `md()` function escapes before markdown transforms |
-| **SSRF prevention** | `isValidExternalDomain()` blocks IPs, localhost, private ranges, link-local, internal TLDs on all fetch/Puppeteer calls |
+| **JWT signature verification** | JWKS fetched from Access, RS256 signatures verified with `crypto.subtle`. Keys cached 1 hour. |
+| **Auth bypass prevention** | `_user` param requires explicit `DEV_MODE` env var — no header sniffing |
+| **Encryption with secret** | Key derivation uses `ENC_SECRET` Worker secret + salt + key name — not deterministic from source |
+| **OAuth token encryption** | Gmail and Salesforce tokens encrypted with AES-GCM before D1 storage, decrypted on read |
+| **XSS protection** | Global `esc()` applied to all user-supplied and external data (account names, threat titles, RSS content) |
+| **SSRF prevention** | `isValidExternalDomain()` blocks IPs, localhost, private ranges, link-local, internal TLDs |
 | **SOQL injection** | Full character escaping (`\`, `'`, `%`, `_`) on all Salesforce SOQL queries |
-| **CORS lockdown** | Origin-restricted; allows `.workers.dev`, `localhost` only (no wildcard) |
+| **CORS whitelist** | Only `.workers.dev` + `localhost` origins allowed; all others denied (no wildcard fallback) |
+| **Email abuse protection** | 100 emails/day per user limit with atomic check-and-insert to prevent race conditions |
 | **Share token hardening** | Full UUID (128-bit entropy) with mandatory 30-day expiry |
-| **Input validation** | `limit` capped at 200, `page` floored at 1, `days` capped at 90 |
-| **Authorization checks** | Campaign send verifies ownership; meeting prep/win-loss sub-queries include `user_email` |
-| **AES-256-GCM** | Encrypted credential storage for OAuth secrets and API keys |
+| **Input validation** | `limit` capped at 200, `page` floored at 1, `days` capped at 90, campaign batches capped at 20 |
+| **Atomic operations** | Multi-table deletes use `DB.batch()` for transactional safety |
+| **Error observability** | All catch blocks log via `console.error`; global `app.onError` handler standardizes error responses |
 
 ---
 
-## 7. API Endpoints (60+ endpoints)
+## 7. API Endpoints (80+ endpoints)
 
 ### Account Management
 | Method | Path | Description |
@@ -294,12 +309,30 @@ All data is **user-scoped** via `user_email` column.
 | `POST` | `/api/search/index` | Re-index all content for user |
 | `GET` | `/api/search?q=` | Keyword + AI-ranked search |
 
+### Contacts
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/contacts/:accountId` | List contacts for account |
+| `POST` | `/api/contacts` | Create contact |
+| `PUT` | `/api/contacts/:id` | Update contact |
+| `DELETE` | `/api/contacts/:id` | Delete contact |
+| `POST` | `/api/contacts/import/:accountId` | Bulk import contacts (max 100) |
+
+### Scheduled Sends
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/scheduled-sends` | Schedule email for future delivery |
+| `GET` | `/api/scheduled-sends` | List pending scheduled sends |
+| `DELETE` | `/api/scheduled-sends/:id` | Cancel a scheduled send |
+
 ### Gmail
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/api/gmail/connect` | Start OAuth flow |
-| `POST` | `/api/gmail/send` | Send email (requires approval) |
-| `POST` | `/api/gmail/send-campaign/:id` | Bulk send approved emails (10/batch) |
+| `GET` | `/api/gmail/daily-limit` | Check daily send limit status |
+| `POST` | `/api/gmail/send` | Send email (requires approval, enforces 100/day limit) |
+| `POST` | `/api/gmail/send-campaign/:id` | Bulk send approved emails (capped by daily limit) |
+| `POST` | `/api/gmail/check-replies` | Poll Gmail threads for replies |
 
 ### Salesforce
 | Method | Path | Description |
@@ -539,7 +572,7 @@ Built-in page and tab visit tracking to understand how your team uses RevFlare.
 
 ## 18. Gmail Integration
 
-OAuth flow via Google Cloud Console credentials. Stored encrypted in D1 or as Worker secrets. Sends via Gmail API (`gmail.send` scope only). Auto-refreshes tokens. In-app wizard with no CLI needed.
+OAuth flow via Google Cloud Console credentials. Stored **encrypted** (AES-GCM) in D1 or as Worker secrets. Sends via Gmail API (`gmail.send` + `gmail.readonly` scopes). Auto-refreshes tokens. In-app wizard with no CLI needed.
 
 **Email Approval Workflow**: Every generated email (persona messages and campaign emails) starts with `pending_approval` status. Before sending via Gmail, users must:
 1. **Review recipient info** — account name, website, industry, location, account status, IT spend, and tech stack are displayed prominently
@@ -548,13 +581,25 @@ OAuth flow via Google Cloud Console credentials. Stored encrypted in D1 or as Wo
 
 For campaigns, bulk approve/reject actions and filter-by-status tabs allow efficient review of large email batches.
 
+**Daily Email Limit (100/day per user)**: To protect email domain reputation and prevent abuse flags:
+- Each successful send is logged in `email_send_log` with an atomic check-and-insert (no race conditions)
+- When the limit is reached, a persistent amber notification banner explains the limit and directs the user to contact their admin
+- A warning toast appears when fewer than 10 sends remain
+- Campaign batch sends are automatically capped to the remaining daily allowance
+- `GET /api/gmail/daily-limit` returns current usage for the frontend
+
+**Reply Tracking**: Sent emails record their Gmail thread ID. The `POST /api/gmail/check-replies` endpoint (and nightly cron) polls Gmail threads to detect replies, updating the `replied` flag on `persona_messages` and `campaign_emails`.
+
+**Scheduled Sending**: Emails can be scheduled for future delivery via `POST /api/scheduled-sends`. The nightly cron processes all pending sends whose `scheduled_for` has passed, respecting the daily email limit.
+
 ---
 
 ## 19. Salesforce Integration
 
-OAuth flow to Salesforce. Supports:
+OAuth flow to Salesforce. Tokens stored **encrypted** (AES-GCM) in D1. Supports:
 - **Push activities**: Send research reports and generated emails as SF Tasks
 - **Pull opportunities**: Fetch opportunities from SF for any account
+- **Automatic nightly sync**: The cron job pushes recently sent emails (last 24h) as Salesforce Tasks, matched to SF Account by name
 - Credentials stored encrypted in D1 via in-app settings
 
 ---
@@ -567,7 +612,14 @@ OAuth flow to Salesforce. Supports:
 
 ## 21. Encrypted Settings
 
-AES-256-GCM via Web Crypto API. Key derived from SHA-256 of `revflare-settings-v1:{keyName}`. Random 12-byte IV per encryption. Only the running Worker can decrypt.
+AES-256-GCM via Web Crypto API. Key derived from SHA-256 of `revflare-settings-v1:{ENC_SECRET}:{keyName}`. Random 12-byte IV per encryption. The `ENC_SECRET` Worker secret ensures encryption is not deterministic from source code alone.
+
+**What's encrypted**:
+- App settings (API keys, OAuth client secrets)
+- Gmail OAuth tokens (access_token, refresh_token)
+- Salesforce OAuth tokens (access_token, refresh_token)
+
+Legacy plaintext tokens are transparently handled: decryption falls back to raw value, and tokens are re-encrypted on next refresh/reconnect.
 
 ---
 
@@ -577,13 +629,30 @@ AES-256-GCM via Web Crypto API. Key derived from SHA-256 of `revflare-settings-v
 git clone https://github.com/pottaarun/RevFlare.git
 cd RevFlare
 npm install
-wrangler d1 create revflare-db                              # Create database
-wrangler d1 execute revflare-db --remote --file=schema-full.sql  # All 18 tables + indexes
-wrangler d1 execute revflare-db --remote --file=migration-approval.sql  # Add approval workflow columns
-wrangler deploy                                              # Deploy to Cloudflare
+
+# Create database and run all migrations
+wrangler d1 create revflare-db
+wrangler d1 execute revflare-db --remote --file=schema-full.sql
+wrangler d1 execute revflare-db --remote --file=migration-approval.sql
+wrangler d1 execute revflare-db --remote --file=migration-email-daily-limit.sql
+wrangler d1 execute revflare-db --remote --file=migration-improvements.sql
+
+# Set required secrets
+wrangler secret put ENC_SECRET              # Any random string for encryption
+wrangler secret put CF_ACCESS_TEAM_DOMAIN   # e.g. 'myteam.cloudflareaccess.com'
+wrangler secret put CF_ACCESS_AUD           # From Access app config
+
+# Deploy
+wrangler deploy
 ```
 
 Configure Cloudflare Access on `revflare.*.workers.dev` for auth.
+
+### Running Tests
+```bash
+npm install -D vitest
+npm test
+```
 
 ---
 
@@ -592,25 +661,26 @@ Configure Cloudflare Access on `revflare.*.workers.dev` for auth.
 ```
 revFlare/
 ├── src/
-│   ├── index.ts              # Main Worker (~3,700 lines)
-│   ├── advanced-features.ts  # Lead scoring, ROI, lookalikes, sequences, etc.
-│   └── threat-intel.ts       # Threat intelligence module (~465 lines)
+│   ├── index.ts                    # Main Worker (~4,700 lines)
+│   ├── advanced-features.ts        # Lead scoring, ROI, lookalikes, sequences, etc.
+│   ├── advanced-features.test.ts   # Unit tests (vitest)
+│   └── threat-intel.ts             # Threat intelligence module (~465 lines)
 ├── public/
-│   ├── index.html            # HTML shell + nav + Gmail wizard
-│   ├── app.js                # Frontend SPA (~3,000 lines)
-│   └── styles.css            # Design system (~1,400 lines)
-├── screenshots/              # App screenshots (auto-generated)
-├── schema-full.sql           # Complete DB schema (18 tables + indexes)
-├── schema.sql                # Core DB schema (legacy)
-├── migration-approval.sql    # Email approval workflow migration
-├── seed.mjs                  # Excel seed script
-├── build_final_pptx.py       # Presentation builder (mock server + Playwright + python-pptx)
-├── RevFlare-Presentation.pptx  # 7-slide presentation with screenshots
-├── wrangler.toml             # Worker config
-├── package.json              # Dependencies
-├── tsconfig.json             # TypeScript config
-└── README.md                 # This file
+│   ├── index.html                  # HTML shell + nav + Gmail wizard
+│   ├── app.js                      # Frontend SPA (~3,700 lines)
+│   └── styles.css                  # Design system (~1,400 lines)
+├── screenshots/                    # App screenshots (auto-generated)
+├── schema-full.sql                 # Complete DB schema (21 tables + indexes)
+├── schema.sql                      # Core DB schema (legacy)
+├── migration-approval.sql          # Email approval workflow migration
+├── migration-email-daily-limit.sql # Daily send limit tracking table
+├── migration-improvements.sql      # Contacts, scheduled sends, reply tracking, indexes
+├── seed.mjs                        # Excel seed script
+├── wrangler.toml                   # Worker config
+├── package.json                    # Dependencies + test scripts
+├── tsconfig.json                   # TypeScript config (strict, zero errors)
+└── README.md                       # This file
 ```
 
-**Total codebase**: ~9,000 lines across 9 source files.
-**Dependencies**: hono, @cloudflare/puppeteer, @cloudflare/workers-types, typescript, wrangler, xlsx
+**Total codebase**: ~10,500 lines across 10 source files.
+**Dependencies**: hono, @cloudflare/puppeteer, @cloudflare/workers-types, typescript, wrangler, xlsx, vitest (dev)

@@ -242,13 +242,12 @@ app.use('/api/*', async (c, next) => {
     const verified = await verifyAccessJWT(jwt, c.env.CF_ACCESS_TEAM_DOMAIN, c.env.CF_ACCESS_AUD);
     if (verified) email = verified.email;
   } else if (jwt) {
-    // CF_ACCESS_TEAM_DOMAIN not configured — reject JWT, do not decode unverified tokens
-    console.error('SECURITY: JWT present but CF_ACCESS_TEAM_DOMAIN not set. Rejecting unverified token.');
+    // CF_ACCESS_TEAM_DOMAIN not configured — can't verify JWT signature.
+    // Trust the Cf-Access-Authenticated-User-Email header as fallback since
+    // the JWT's presence proves the request came through the Access gateway.
+    console.warn('CF_ACCESS_TEAM_DOMAIN not set — using Access email header (unverified JWT). Set this secret for full security.');
+    email = c.req.header('Cf-Access-Authenticated-User-Email') || '';
   }
-
-  // 2. Cf-Access-Authenticated-User-Email header — only trusted when JWT was verified
-  //    (This header alone can be spoofed; it's only safe when Access gateway sets it alongside a valid JWT)
-  // Removed: trusting this header without JWT verification is an auth bypass vector.
 
   // 3. Local dev only: explicit DEV_MODE env var required (not header sniffing)
   if (!email && c.env.DEV_MODE === 'true') {

@@ -1613,6 +1613,29 @@ tr:last-child td { border-bottom: none; }
   border-color: var(--border-accent) !important;
 }
 
+/* ── Bulk selection (dashboard multi-select) ─────────────────────── */
+tr.bulk-selected td {
+  background: rgba(124, 127, 255, 0.08);
+}
+tr.bulk-selected td:first-child {
+  box-shadow: inset 2px 0 0 var(--accent, #7c7fff);
+}
+.bulk-cb, .bulk-cb-head {
+  width: 14px; height: 14px; cursor: pointer;
+  accent-color: var(--accent, #7c7fff);
+}
+
+/* ── Command palette ─────────────────────────────────────────────── */
+#cmd-palette { animation: fade-in 0.15s ease; }
+.cmd-item:hover { background: rgba(124,127,255,0.06); }
+@keyframes fade-in { from { opacity: 0 } to { opacity: 1 } }
+
+/* ── Persona recommender chips ───────────────────────────────────── */
+.persona-rec:hover {
+  background: rgba(124,127,255,0.12) !important;
+  border-color: var(--border-accent, rgba(124,127,255,0.3)) !important;
+}
+
 /* ── Responsive ─────────────────────────────────────────────────── */
 @media (max-width: 768px) {
   #main { padding: 20px 16px; }

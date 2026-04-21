@@ -192,7 +192,7 @@ s=prs.slides.add_slide(prs.slide_layouts[6]); bg(s)
 bar(s,Inches(1.5),Inches(2.2),Inches(2),ACC)
 txt(s,Inches(1.5),Inches(2.5),Inches(10),Inches(1.2),'RevFlare',sz=72,c=WHT,b=True)
 txt(s,Inches(1.5),Inches(3.8),Inches(8),Inches(0.8),'AI-Powered Sales Intelligence for Cloudflare',sz=30,c=ACC)
-txt(s,Inches(1.5),Inches(5.0),Inches(8),Inches(1.0),'A single Cloudflare Worker powering deep account research, persona-curated outreach, competitive intelligence, threat monitoring, and autonomous pipeline generation.',sz=15,c=MUT)
+txt(s,Inches(1.5),Inches(5.0),Inches(8),Inches(1.0),'A single Cloudflare Worker powering deep account research, persona-curated outreach, competitive intelligence, threat monitoring, autonomous pipeline generation, MCP integrations, and compliant email execution.',sz=15,c=MUT)
 txt(s,Inches(1.5),Inches(6.5),Inches(10),Inches(0.3),'Built by Arun Potta  |  Powered by Cloudflare Workers + AI',sz=12,c=DIM)
 
 # ══════════════════════════════════════════════════════════════════
@@ -201,14 +201,14 @@ txt(s,Inches(1.5),Inches(6.5),Inches(10),Inches(0.3),'Built by Arun Potta  |  Po
 s=prs.slides.add_slide(prs.slide_layouts[6]); bg(s)
 bar(s,Inches(1),Inches(0.6),Inches(1.5),ACC)
 txt(s,Inches(1),Inches(0.75),Inches(10),Inches(0.6),'Business Value & ROI',sz=36,c=WHT,b=True)
-txt(s,Inches(1),Inches(1.3),Inches(9),Inches(0.3),'RevFlare transforms how sales teams prospect, research, and close deals.',sz=14,c=MUT)
+txt(s,Inches(1),Inches(1.3),Inches(9),Inches(0.3),'RevFlare transforms how sales teams prospect, research, approve, and close deals.',sz=14,c=MUT)
 
 # Value props - compact
 vals = [
     ('10x Faster Research','8 live probes in parallel. 45 min -> 10 sec per account.',GRN),
-    ('3x Higher Reply Rates','25 persona-specific variants with live data. Not templates.',BLU),
+    ('3x Higher Reply Rates','25 persona variants + AI chat refinement. Not templates.',BLU),
     ('100% Pipeline Coverage','AI agent auto-generates opps with realistic ACV.',PUR),
-    ('$0 Infrastructure Cost','Runs entirely on Cloudflare. No servers, no SaaS fees.',AMB),
+    ('Open Ecosystem','MCP client + server. Bring your own tools & agents.',AMB),
 ]
 for i,(title,desc,c) in enumerate(vals):
     y=Inches(1.85+i*0.7)
@@ -239,7 +239,7 @@ txt(s,Inches(1),Inches(4.88),Inches(11.3),Inches(0.4),'Annual value: 10 reps x 7
 
 # Architecture mini at bottom
 txt(s,Inches(1),Inches(5.6),Inches(5),Inches(0.25),'CLOUDFLARE EDGE ARCHITECTURE',sz=10,c=DIM,b=True)
-svcs = [('Workers','App server',ACC),('D1','Database',GRN),('Workers AI','3 LLMs',PUR),('Browser','Scraping',BLU),('KV','Cache',AMB),('Access','Auth',RED)]
+svcs = [('Workers','App server',ACC),('D1','29 tables',GRN),('Workers AI','3 LLMs',PUR),('Browser','Scraping',BLU),('KV','Cache',AMB),('Cron','Auto-send',RED)]
 for i,(nm,ds,c) in enumerate(svcs):
     x=Inches(1+i*2.0); y=Inches(5.95)
     rect(s,x,y,Inches(1.8),Inches(1.15),SURF); bar(s,x,y,Inches(1.8),c)
@@ -277,24 +277,24 @@ if os.path.exists(shot_l):
     img(s,shot_l,Inches(6.9),Inches(1.45),Inches(6.15),Inches(5.7))
 
 # ══════════════════════════════════════════════════════════════════
-# SLIDE 5: 15 Features + Competitive Intel (merged)
+# SLIDE 5: 20 Features + Competitive Intel (merged)
 # ══════════════════════════════════════════════════════════════════
 s=prs.slides.add_slide(prs.slide_layouts[6]); bg(s)
 bar(s,Inches(0.5),Inches(0.5),Inches(1.5),ACC)
-txt(s,Inches(0.5),Inches(0.65),Inches(10),Inches(0.5),'16 Features + Competitive Intelligence',sz=32,c=WHT,b=True)
+txt(s,Inches(0.5),Inches(0.65),Inches(10),Inches(0.5),'20 Features + Competitive Intelligence',sz=32,c=WHT,b=True)
 
-# Features - 5x3 compact grid
+# Features - 5x4 compact grid (20 features)
 feats = [
-    ('Lead Scoring','AI 0-100',GRN),('ROI Calc','Savings est.',BLU),('Lookalikes','Match stack',PUR),('Meeting Prep','Call brief',AMB),('Sequences','Multi-touch',ORG),
-    ('Change Detect','Infra scan',RED),('A/B Testing','2 variants',ACC),('Voice Notes','To email',GRN),('Alerts','Signals',RED),('Team Dash','Leaderboard',BLU),
+    ('Lead Scoring','AI 0-100',GRN),('ROI Calc','Savings est.',BLU),('Lookalikes','Match stack',PUR),('Meeting Prep','Call brief',AMB),('Sequences','Auto-execute',ORG),
+    ('Change Detect','Infra scan',RED),('A/B Testing','2 variants',ACC),('Voice Notes','To email',GRN),('Alerts','+ AI products',RED),('Team Dash','Leaderboard',BLU),
     ('Playbooks','Templates',PUR),('Search','AI-ranked',AMB),('Pipeline','ACV track',GRN),('Win/Loss','Analysis',ORG),('Opp Agent','Auto gen',ACC),
-    ('Email Approval','Review & gate',GRN),
+    ('Email Approval','Review & gate',GRN),('AI Chat Refine','Rewrite in place',BLU),('Open Tracking','Pixel + stats',PUR),('CAN-SPAM','Unsubscribe',AMB),('MCP Gateway','Client + server',ORG),
 ]
 for i,(nm,ds,c) in enumerate(feats):
-    col=i%5; row=i//5; x=Inches(0.5+col*1.65); y=Inches(1.35+row*0.85)
-    rect(s,x,y,Inches(1.5),Inches(0.7),SURF); bar(s,x,y,Inches(1.5),c)
-    txt(s,x+Inches(0.08),y+Inches(0.08),Inches(1.35),Inches(0.22),nm,sz=10,c=c,b=True)
-    txt(s,x+Inches(0.08),y+Inches(0.32),Inches(1.35),Inches(0.3),ds,sz=8,c=MUT)
+    col=i%5; row=i//5; x=Inches(0.5+col*1.65); y=Inches(1.35+row*0.75)
+    rect(s,x,y,Inches(1.5),Inches(0.62),SURF); bar(s,x,y,Inches(1.5),c)
+    txt(s,x+Inches(0.08),y+Inches(0.06),Inches(1.35),Inches(0.22),nm,sz=10,c=c,b=True)
+    txt(s,x+Inches(0.08),y+Inches(0.28),Inches(1.35),Inches(0.3),ds,sz=8,c=MUT)
 
 # Competitive - right half
 txt(s,Inches(8.75),Inches(1.25),Inches(4),Inches(0.25),'COMPETITIVE (12 CATEGORIES, 40+ RIVALS)',sz=9,c=DIM,b=True)
@@ -304,22 +304,22 @@ for i,ct in enumerate(cats):
     txt(s,Inches(8.88),y+Inches(0.04),Inches(3.85),Inches(0.22),ct,sz=9,c=GRY)
 
 # Threat Intel - bottom
-txt(s,Inches(0.5),Inches(4.35),Inches(5),Inches(0.25),'THREAT INTELLIGENCE',sz=9,c=DIM,b=True)
+txt(s,Inches(0.5),Inches(4.55),Inches(5),Inches(0.25),'THREAT INTELLIGENCE',sz=9,c=DIM,b=True)
 thr = [('26 RSS Feeds','Real-time incidents',RED),('GDELT + 5 News APIs','Google, Bing, NewsAPI, GNews, MediaStack',AMB),('Auto-Match','By industry & country',BLU),('Trigger Emails','Incident outreach',GRN),('Nightly Cron','Daily scan + alerts',PUR)]
 for i,(t,d,c) in enumerate(thr):
-    x=Inches(0.5+i*2.55); y=Inches(4.65)
-    rect(s,x,y,Inches(2.4),Inches(0.65),SURF)
-    sh=s.shapes.add_shape(MSO_SHAPE.RECTANGLE,x,y,Pt(3),Inches(0.65)); sh.fill.solid(); sh.fill.fore_color.rgb=c; sh.line.fill.background()
-    txt(s,x+Inches(0.15),y+Inches(0.05),Inches(2.1),Inches(0.2),t,sz=10,c=c,b=True)
-    txt(s,x+Inches(0.15),y+Inches(0.3),Inches(2.1),Inches(0.2),d,sz=8,c=MUT)
+    x=Inches(0.5+i*2.55); y=Inches(4.85)
+    rect(s,x,y,Inches(2.4),Inches(0.6),SURF)
+    sh=s.shapes.add_shape(MSO_SHAPE.RECTANGLE,x,y,Pt(3),Inches(0.6)); sh.fill.solid(); sh.fill.fore_color.rgb=c; sh.line.fill.background()
+    txt(s,x+Inches(0.15),y+Inches(0.04),Inches(2.1),Inches(0.2),t,sz=10,c=c,b=True)
+    txt(s,x+Inches(0.15),y+Inches(0.28),Inches(2.1),Inches(0.2),d,sz=8,c=MUT)
 
 # Security + Integrations - bottom strip
-txt(s,Inches(0.5),Inches(5.55),Inches(5),Inches(0.25),'SECURITY & INTEGRATIONS',sz=9,c=DIM,b=True)
-items = [('Zero Trust Auth',GRN),('AES-256-GCM',BLU),('SSRF Block',RED),('XSS Escaped',AMB),('SOQL Safe',PUR),('CORS Locked',ACC),('Gmail OAuth',GRN),('Salesforce OAuth',BLU),('Share Links',PUR)]
+txt(s,Inches(0.5),Inches(5.65),Inches(5),Inches(0.25),'SECURITY & INTEGRATIONS (47 FIXES ACROSS 3 AUDIT ROUNDS)',sz=9,c=DIM,b=True)
+items = [('Access JWT',GRN),('AES-256-GCM',BLU),('SSRF Block',RED),('XSS Escaped',AMB),('SOQL Safe',PUR),('CORS Locked',ACC),('Gmail OAuth',GRN),('SF OAuth',BLU),('Share Links',PUR),('MCP Secure',ORG)]
 for i,(t,c) in enumerate(items):
-    x=Inches(0.5+i*1.4); y=Inches(5.85)
-    rect(s,x,y,Inches(1.3),Inches(0.4),SURF); bar(s,x,y,Inches(1.3),c)
-    txt(s,x+Inches(0.08),y+Inches(0.08),Inches(1.2),Inches(0.25),t,sz=8,c=c,b=True)
+    x=Inches(0.5+i*1.27); y=Inches(5.95)
+    rect(s,x,y,Inches(1.2),Inches(0.4),SURF); bar(s,x,y,Inches(1.2),c)
+    txt(s,x+Inches(0.08),y+Inches(0.08),Inches(1.1),Inches(0.25),t,sz=8,c=c,b=True)
 
 # ══════════════════════════════════════════════════════════════════
 # SLIDE 6: Alerts + Team + Playbooks screenshots
@@ -343,7 +343,78 @@ if os.path.exists(shot_pb):
     img(s,shot_pb,Inches(9.1),Inches(1.45),Inches(3.95),Inches(5.7))
 
 # ══════════════════════════════════════════════════════════════════
-# SLIDE 7: Closing
+# SLIDE 7: MCP + Email Tracking + AI Chat (what's new)
+# ══════════════════════════════════════════════════════════════════
+s=prs.slides.add_slide(prs.slide_layouts[6]); bg(s)
+bar(s,Inches(0.5),Inches(0.4),Inches(1.5),ACC)
+txt(s,Inches(0.5),Inches(0.55),Inches(12),Inches(0.5),'Open Ecosystem, Compliant Outreach, Conversational AI',sz=28,c=WHT,b=True)
+txt(s,Inches(0.5),Inches(1.1),Inches(12),Inches(0.3),'Four new capabilities bringing RevFlare from standalone tool to enterprise platform.',sz=12,c=MUT)
+
+# ── MCP Integration (top-left, full height) ────────────────────────
+rect(s,Inches(0.5),Inches(1.6),Inches(6.2),Inches(2.75),ELEV); bar(s,Inches(0.5),Inches(1.6),Inches(6.2),ORG)
+txt(s,Inches(0.7),Inches(1.7),Inches(5.8),Inches(0.3),'MCP (Model Context Protocol)',sz=14,c=ORG,b=True)
+txt(s,Inches(0.7),Inches(2.0),Inches(5.8),Inches(0.3),'Bi-directional. Client + Server.',sz=10,c=MUT)
+
+txt(s,Inches(0.7),Inches(2.35),Inches(2.8),Inches(0.22),'AS CLIENT',sz=9,c=DIM,b=True)
+mcp_client = ['+ Netstrat (network + strategy)','+ Google Workspace (calendar, contacts)','+ Wiki (internal knowledge)','+ Jira (issue context)','+ Cloudflare Docs (product lookup)','+ SSRF-hardened URL validator']
+for i,item in enumerate(mcp_client):
+    txt(s,Inches(0.7),Inches(2.55+i*0.22),Inches(3.0),Inches(0.2),item,sz=8,c=GRY)
+
+txt(s,Inches(3.8),Inches(2.35),Inches(2.8),Inches(0.22),'AS SERVER',sz=9,c=DIM,b=True)
+mcp_server = ['+ lookup_account','+ get_lead_score','+ get_account_research','+ get_pipeline','+ get_alerts','+ get_email_stats']
+for i,item in enumerate(mcp_server):
+    txt(s,Inches(3.8),Inches(2.55+i*0.22),Inches(3.0),Inches(0.2),item,sz=8,c=GRY)
+
+# ── AI Chat Email Refinement (top-right) ───────────────────────────
+rect(s,Inches(6.85),Inches(1.6),Inches(6.2),Inches(2.75),ELEV); bar(s,Inches(6.85),Inches(1.6),Inches(6.2),BLU)
+txt(s,Inches(7.05),Inches(1.7),Inches(5.8),Inches(0.3),'AI Chat Email Refinement',sz=14,c=BLU,b=True)
+txt(s,Inches(7.05),Inches(2.0),Inches(5.8),Inches(0.3),'Conversational rewrites. Full turn history.',sz=10,c=MUT)
+
+chat_feats = [
+    '+ Plain-English instructions: "make it shorter, lead with ROI"',
+    '+ Llama 3.3 70B multi-turn with context memory (20 prior turns)',
+    '+ Rewrites in place, resets to pending_approval for re-review',
+    '+ Full chat history persisted per message for auditability',
+    '+ Works on persona messages AND campaign emails',
+    '+ Subject line auto-extracted and updated alongside body',
+]
+for i,item in enumerate(chat_feats):
+    txt(s,Inches(7.05),Inches(2.4+i*0.28),Inches(6.0),Inches(0.25),item,sz=9,c=GRY)
+
+# ── Email Tracking & CAN-SPAM (bottom-left) ────────────────────────
+rect(s,Inches(0.5),Inches(4.5),Inches(6.2),Inches(2.75),ELEV); bar(s,Inches(0.5),Inches(4.5),Inches(6.2),PUR)
+txt(s,Inches(0.7),Inches(4.6),Inches(5.8),Inches(0.3),'Email Tracking & CAN-SPAM',sz=14,c=PUR,b=True)
+txt(s,Inches(0.7),Inches(4.9),Inches(5.8),Inches(0.3),'Opens, unsubscribes, suppression - built in.',sz=10,c=MUT)
+
+track_feats = [
+    '+ 1x1 tracking pixel per email (unique tracking_id)',
+    '+ One-click List-Unsubscribe header + landing page',
+    '+ Per-user suppression list (bounces, complaints)',
+    '+ Auto-block of suppressed addresses before send',
+    '+ Public endpoints bypass Access for deliverability',
+    '+ Gmail signature auto-appended to every outbound',
+]
+for i,item in enumerate(track_feats):
+    txt(s,Inches(0.7),Inches(5.3+i*0.28),Inches(6.0),Inches(0.25),item,sz=9,c=GRY)
+
+# ── Email Performance Dashboard (bottom-right) ─────────────────────
+rect(s,Inches(6.85),Inches(4.5),Inches(6.2),Inches(2.75),ELEV); bar(s,Inches(6.85),Inches(4.5),Inches(6.2),GRN)
+txt(s,Inches(7.05),Inches(4.6),Inches(5.8),Inches(0.3),'Email Performance Dashboard',sz=14,c=GRN,b=True)
+txt(s,Inches(7.05),Inches(4.9),Inches(5.8),Inches(0.3),'Funnel, trends, suppression - one screen.',sz=10,c=MUT)
+
+perf_feats = [
+    '+ Sent / opened / replied rates per user',
+    '+ Daily send trend (last 14 days) with cap tracking',
+    '+ Per-campaign funnel (last 20 campaigns)',
+    '+ Suppression list management with remove button',
+    '+ Today\'s usage vs 100/day cap (reputation protection)',
+    '+ Per-message open count + reply flag on every email',
+]
+for i,item in enumerate(perf_feats):
+    txt(s,Inches(7.05),Inches(5.3+i*0.28),Inches(6.0),Inches(0.25),item,sz=9,c=GRY)
+
+# ══════════════════════════════════════════════════════════════════
+# SLIDE 8: Closing
 # ══════════════════════════════════════════════════════════════════
 s=prs.slides.add_slide(prs.slide_layouts[6]); bg(s)
 gl=s.shapes.add_shape(MSO_SHAPE.OVAL,Inches(3),Inches(0),Inches(7),Inches(5)); gl.fill.solid(); gl.fill.fore_color.rgb=RGBColor(0x1A,0x1D,0x3A); gl.line.fill.background()
@@ -351,7 +422,7 @@ gl=s.shapes.add_shape(MSO_SHAPE.OVAL,Inches(3),Inches(0),Inches(7),Inches(5)); g
 bar(s,Inches(1),Inches(0.8),Inches(1.5),ACC)
 txt(s,Inches(1),Inches(1.0),Inches(10),Inches(0.6),'RevFlare by the Numbers',sz=40,c=WHT,b=True)
 
-nums = [('~8,600','Lines of Code',GRN),('17','DB Tables',BLU),('60+','API Endpoints',PUR),('8','Live Probes',AMB),('25','Email Variants',ORG),
+nums = [('~12,700','Lines of Code',GRN),('29','DB Tables',BLU),('108','API Endpoints',PUR),('8','Live Probes',AMB),('25','Email Variants',ORG),
         ('12','Competitive Cats',RED),('40+','Competitors',ACC),('26','Threat Feeds',RED),('5','Personas',GRN),('$0','Infra Cost',AMB)]
 for i,(v,lb,c) in enumerate(nums):
     col=i%5; row=i//5; x=Inches(0.7+col*2.45); y=Inches(2.0+row*1.5)

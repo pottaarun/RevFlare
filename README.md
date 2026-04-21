@@ -15,15 +15,23 @@
 12. [Campaign Themes](#12-campaign-themes)
 13. [Competitive Intelligence Engine](#13-competitive-intelligence-engine)
 14. [Threat Intelligence Pipeline](#14-threat-intelligence-pipeline)
-15. [Advanced Features (15)](#15-advanced-features)
+15. [Advanced Features](#15-advanced-features)
 16. [Opportunity Agent](#16-opportunity-agent)
 17. [Usage Analytics](#17-usage-analytics)
 18. [Gmail Integration](#18-gmail-integration)
 19. [Salesforce Integration](#19-salesforce-integration)
 20. [Sharing System](#20-sharing-system)
 21. [Encrypted Settings](#21-encrypted-settings)
-22. [Deployment Instructions](#22-deployment-instructions)
-23. [File Structure](#23-file-structure)
+22. [MCP Integration](#22-mcp-integration)
+23. [Email Tracking & Compliance](#23-email-tracking--compliance)
+24. [AI Chat Email Refinement](#24-ai-chat-email-refinement)
+25. [Email Performance Dashboard](#25-email-performance-dashboard)
+26. [Semantic Search](#26-semantic-search)
+27. [AI Quality Optimizations](#27-ai-quality-optimizations)
+28. [Command Palette & Bulk Actions](#28-command-palette--bulk-actions)
+29. [Organizations & Teams](#29-organizations--teams)
+30. [Deployment Instructions](#30-deployment-instructions)
+31. [File Structure](#31-file-structure)
 
 ---
 
@@ -42,14 +50,20 @@
 - **Track lead scores**, alerts, team activity, playbooks, and semantic search across all generated intel
 - **Monitor usage analytics** with page/tab visit tracking, daily trends, per-user activity, and tab popularity rankings
 - **Review and approve emails before sending** with a full approval workflow — each generated email shows recipient details (account name, website, industry, location, IT spend) and must be explicitly approved before it can be sent via Gmail
-- **Send emails directly via Gmail** through OAuth integration, with a **100 email/day limit per user** to protect domain reputation
+- **Refine emails conversationally** via AI chat — paste an instruction like "make it shorter, lead with ROI, end with a Tuesday meeting ask" and a 70B model rewrites the email in place, preserving a full turn-by-turn history
+- **Send emails directly via Gmail** through OAuth integration, with a **100 email/day limit per user** to protect domain reputation, and automatic appending of the user's Gmail signature to every outbound message
+- **Track email opens** via transparent 1x1 tracking pixels routed through a public, auth-bypassing endpoint, with open counts aggregated per message and campaign
+- **Stay CAN-SPAM compliant** with one-click unsubscribe links, a managed suppression list (bounces / complaints / unsubscribes), and automatic blocking of sends to suppressed addresses
 - **Track email replies** via Gmail API thread polling, with automated nightly checks
 - **Schedule emails** for future delivery, processed automatically by cron
+- **Execute multi-touch sequences** automatically — activate a sequence, and the cron worker sends each touch on schedule, advancing through the steps and pausing on reply
 - **Manage contacts** linked to accounts, with bulk import from Salesforce
 - **Sync with Salesforce** via OAuth to push activities and pull opportunities, with **automatic nightly sync** of sent emails
+- **Integrate with MCP (Model Context Protocol)** — connect external MCP servers (Netstrat, Google Workspace, Jira, Wiki, Cloudflare Docs, etc.) to enrich AI research, emails, meeting prep, and contacts with live data from your internal tools. RevFlare itself is **also exposed as an MCP server**, so external AI agents (Claude, Cursor, OpenCode) can query your accounts, lead scores, research, pipeline, and email metrics.
+- **Review email outreach performance** with a dedicated dashboard showing sent / opened / replied rates, daily send trends, per-campaign funnel, and suppression-list management
 - **Share account intelligence** via tokenized public links that bypass Cloudflare Access
 
-The entire application is a **single Cloudflare Worker** (~4,700 lines of TypeScript) with a **vanilla JavaScript SPA** frontend (~3,700 lines). No React, no build step for the frontend, no external backend.
+The entire application is a **single Cloudflare Worker** (~5,600 lines of TypeScript) with a **vanilla JavaScript SPA** frontend (~4,100 lines). No React, no build step for the frontend, no external backend.
 
 **Live URL**: https://revflare.arunpotta1024.workers.dev
 **GitHub**: https://github.com/pottaarun/RevFlare
@@ -71,28 +85,41 @@ The entire application is a **single Cloudflare Worker** (~4,700 lines of TypeSc
 │         │               │             │               │        │
 │  ┌──────▼───────────────▼─────────────▼───────────────▼──────┐ │
 │  │              Hono Worker (src/index.ts)                    │ │
-│  │  - 60+ API endpoints                                      │ │
-│  │  - Live research engine (8 probes)                         │ │
+│  │  - 117 API endpoints                                       │ │
+│  │  - Live research engine (8 probes, 6h KV cache)            │ │
 │  │  - Threat intelligence (7 source categories)               │ │
-│  │  - AI orchestration (DeepSeek R1 + Llama 3.3 + 3.1)       │ │
+│  │  - AI orchestration (DeepSeek R1 + Llama 3.3 + 3.1)        │ │
+│  │  - BGE semantic search (768-dim D1 BLOBs)                  │ │
+│  │  - Reply-rate-aware persona/msg recommender                │ │
 │  │  - Daisy-chained opportunity agent                         │ │
 │  │  - 5 persona × 5 message type messaging engine             │ │
 │  │  - 12-category competitive intelligence                    │ │
 │  │  - 8-theme mass campaign engine                            │ │
+│  │  - MCP client + RevFlare-as-MCP-server                     │ │
+│  │  - Email open tracking, unsubscribes, suppression list     │ │
+│  │  - AI chat email refinement (turn-by-turn history)         │ │
+│  │  - Sequence execution engine (nightly cron)                │ │
+│  │  - Org / team context + shared playbooks                   │ │
+│  │  - Bulk actions (score + research) with per-call caps      │ │
 │  │  - Gmail OAuth + Salesforce OAuth                          │ │
 │  │  - Lead scoring, ROI calc, sequences, A/B testing          │ │
 │  │  - Encrypted settings (AES-256-GCM)                        │ │
-│  └──────────────────────┬────────────────────────────────────┘ │
-│                         │                                      │
-│  ┌──────────────────────▼────────────────────────────────────┐ │
-│  │                    D1 Database                             │ │
+│  └──────────────────────┬─────────────────────────────────────┘ │
+│                         │                                       │
+│  ┌──────────────────────▼─────────────────────────────────────┐ │
+│  │                    D1 Database (33 tables)                 │ │
 │  │  accounts, research_reports, persona_messages,             │ │
 │  │  campaigns, campaign_emails, share_tokens, gmail_tokens,   │ │
 │  │  app_settings, opportunities, lead_scores, sequences,      │ │
 │  │  meeting_preps, alerts, probe_history, playbooks,          │ │
-│  │  voice_notes, vectorize_cache, salesforce_tokens,          │ │
-│  │  page_views                                                │ │
-│  └───────────────────────────────────────────────────────────┘ │
+│  │  voice_notes, vectorize_cache (+ embedding BLOB),          │ │
+│  │  salesforce_tokens, page_views, email_send_log,            │ │
+│  │  email_variants, contacts, scheduled_sends,                │ │
+│  │  email_opens, email_suppression, unsubscribes,             │ │
+│  │  email_chat_history, mcp_servers, mcp_tool_calls,          │ │
+│  │  organizations, org_members, user_prefs,                   │ │
+│  │  persona_performance                                       │ │
+│  └────────────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -105,6 +132,7 @@ The entire application is a **single Cloudflare Worker** (~4,700 lines of TypeSc
 - Cloudflare Radar API
 - Google OAuth2 / Gmail API
 - Salesforce OAuth2 / REST API
+- External MCP servers (Netstrat, Google Workspace, Jira, Wiki, Cloudflare Docs, any JSON-RPC 2.0 compatible endpoint)
 
 ---
 
@@ -113,11 +141,12 @@ The entire application is a **single Cloudflare Worker** (~4,700 lines of TypeSc
 | Service | Binding | Purpose |
 |---------|---------|---------|
 | **Workers** | (runtime) | Application server |
-| **D1** | `DB` | SQLite database (21 tables) |
+| **D1** | `DB` | SQLite database (33 tables) |
 | **Workers AI** | `AI` | LLM inference (3 models) |
 | **Browser Rendering** | `BROWSER` | Headless Chromium via @cloudflare/puppeteer |
 | **Workers KV** | `THREAT_CACHE` | Threat intel cache + URL dedup |
 | **Cloudflare Access** | (infrastructure) | JWT-based auth |
+| **Cron Triggers** | (scheduled) | Nightly threat scan, reply polling, scheduled sends, sequence execution |
 | **Static Assets** | `[assets]` | Serves public/ directory |
 
 ---
@@ -156,19 +185,24 @@ Worker secrets always take priority over D1 settings.
 |-------|---------|-------------|
 | `accounts` | Salesforce data (40+ columns) | account_name, website, industry, IT spend breakdown by category, competitor products, user_email |
 | `research_reports` | AI research output | account_id, report_type, content, user_email |
-| `persona_messages` | Generated emails | account_id, persona, message_type, subject, content, approval_status, gmail_thread_id, replied, user_email |
+| `persona_messages` | Generated emails | account_id, persona, message_type, subject, content, approval_status, tracking_id, open_count, gmail_thread_id, replied, user_email |
 | `campaigns` | Mass email campaigns | name, theme, persona, accountIds (JSON), status, generated count |
-| `campaign_emails` | Individual campaign emails | campaign_id, account_id, subject, content, status, approval_status, gmail_thread_id, replied |
-| `contacts` | **People linked to accounts** | account_id, first_name, last_name, email, title, phone, role, is_primary, salesforce_id, user_email |
-| `email_send_log` | **Daily send limit tracking** | user_email, recipient, subject, source, sent_at |
-| `scheduled_sends` | **Future email delivery** | user_email, to_address, subject, body, scheduled_for, status |
+| `campaign_emails` | Individual campaign emails | campaign_id, account_id, subject, content, status, approval_status, tracking_id, open_count, gmail_thread_id, replied |
+| `email_chat_history` | **AI chat turns per email** | message_id, message_type, role (user/assistant), content, user_email |
+| `email_opens` | **Open tracking events** | tracking_id, source_type, source_id, user_email, opened_at |
+| `email_suppression` | **Bounces / complaints / unsubscribes** | email_address, reason, detail, user_email |
+| `unsubscribes` | **Per-recipient unsubscribes** | email_address, user_email, reason |
+| `email_send_log` | Daily send limit tracking | user_email, recipient, subject, source, sent_at |
+| `email_variants` | A/B test variants | message_id, variant, content, sent, replied |
+| `contacts` | People linked to accounts | account_id, first_name, last_name, email, title, phone, role, is_primary, salesforce_id, user_email |
+| `scheduled_sends` | Future email delivery | user_email, to_address, subject, body, scheduled_for, status |
 | `share_tokens` | Public share links | token (32-char UUID), account_id, created_by, expires_at (30-day default) |
 | `gmail_tokens` | OAuth tokens (encrypted) | user_email (PK), access_token, refresh_token, gmail_address |
 | `salesforce_tokens` | SF OAuth tokens (encrypted) | user_email (PK), instance_url, access_token, refresh_token |
 | `app_settings` | Encrypted config | key (PK), value (AES-256-GCM encrypted) |
 | `opportunities` | Pipeline tracking | account_id, account_name, industry, country, acv, stage, notes, user_email |
 | `lead_scores` | Cached lead scores | account_id (PK), score, factors (JSON) |
-| `sequences` | Multi-touch sequences | account_id, persona, theme, touches (JSON), status |
+| `sequences` | Multi-touch sequences with execution state | account_id, persona, theme, touches (JSON), status, current_touch, next_send_at, to_address |
 | `meeting_preps` | AI meeting briefs | account_id, content, user_email |
 | `alerts` | Infrastructure/threat alerts | account_id, alert_type, title, detail, severity, read |
 | `probe_history` | CDN/DNS snapshots | account_id, cdn_detected, dns_provider, security_headers, probe_hash |
@@ -176,8 +210,17 @@ Worker secrets always take priority over D1 settings.
 | `voice_notes` | Call note transcripts | account_id, transcript, generated_email, user_email |
 | `vectorize_cache` | Search index | content_type, content_id, content_text, account_id |
 | `page_views` | Usage analytics | page, tab, account_id, user_email, created_at |
+| `mcp_servers` | Connected MCP servers per user | name, display_name, server_url, auth_token (encrypted), server_type, enabled, tools_cache, user_email |
+| `mcp_tool_calls` | MCP tool call audit log | mcp_server_id, tool_name, input_params, output_result, duration_ms, success, error, user_email |
+| `organizations` | **Top-level orgs for team collaboration** | name, slug (unique), description, settings (JSON), created_by |
+| `org_members` | **Org membership with roles** | org_id, user_email, role (owner/admin/member), invited_by, joined_at |
+| `user_prefs` | **Per-user preferences (active org, etc.)** | user_email (PK), active_org_id |
+| `persona_performance` | **Aggregated reply-rate stats for the recommender** | industry, persona, message_type, sent, opened, replied |
 
-All data is **user-scoped** via `user_email` column. **21 tables** total.
+Also added: `vectorize_cache.embedding BLOB` column stores 768-dim BGE vectors for true semantic search.
+Also added: `playbooks.org_id` column enables org-shared templates.
+
+All data is **user-scoped** via `user_email` column (with org-scoping available where shared). **33 tables** total.
 
 ---
 
@@ -212,7 +255,7 @@ All data is **user-scoped** via `user_email` column. **21 tables** total.
 
 ---
 
-## 7. API Endpoints (80+ endpoints)
+## 7. API Endpoints Reference (117 endpoints)
 
 ### Account Management
 | Method | Path | Description |
@@ -241,6 +284,12 @@ All data is **user-scoped** via `user_email` column. **21 tables** total.
 | `POST` | `/api/messages/:id/approve` | Approve email for sending |
 | `POST` | `/api/messages/:id/reject` | Reject email |
 
+### AI Chat Email Refinement
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/chat/message/:messageId` | Send refinement instruction; AI rewrites the email in place and re-flags it pending approval |
+| `GET` | `/api/chat/history/:messageId` | Full turn-by-turn chat history for a message |
+
 ### Competitive Intel
 | Method | Path | Description |
 |--------|------|-------------|
@@ -253,6 +302,14 @@ All data is **user-scoped** via `user_email` column. **21 tables** total.
 | `GET` | `/api/threats` | Global threat feed (7 sources) |
 | `GET` | `/api/threats/:id` | Account-matched threats |
 | `POST` | `/api/threats/:id/email` | Incident-triggered email |
+
+### Alerts
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/alerts` | All alerts & notifications |
+| `POST` | `/api/alerts/:id/read` | Mark alert as read |
+| `POST` | `/api/alerts/:id/suggest-products` | AI suggests best Cloudflare products for an alert |
+| `POST` | `/api/alerts/:id/email` | Generate alert-triggered email with product positioning |
 
 ### Campaigns
 | Method | Path | Description |
@@ -277,9 +334,9 @@ All data is **user-scoped** via `user_email` column. **21 tables** total.
 | `GET` | `/api/sequence-templates` | Multi-touch sequence templates |
 | `POST` | `/api/sequences` | Generate sequence for account |
 | `GET` | `/api/sequences` | List all sequences |
+| `POST` | `/api/sequences/:id/activate` | Activate a sequence for auto-execution by cron |
+| `POST` | `/api/sequences/:id/pause` | Pause an active sequence |
 | `POST` | `/api/detect-changes/:id` | CDN/DNS change detection |
-| `GET` | `/api/alerts` | All alerts & notifications |
-| `POST` | `/api/alerts/:id/read` | Mark alert as read |
 | `POST` | `/api/win-loss/:id` | Win/loss analysis for opportunity |
 | `GET` | `/api/playbooks` | List playbooks |
 | `POST` | `/api/playbooks` | Create playbook |
@@ -341,6 +398,49 @@ All data is **user-scoped** via `user_email` column. **21 tables** total.
 | `GET` | `/api/salesforce/status` | Check connection status |
 | `POST` | `/api/salesforce/push-activity` | Push research/email as SF Task |
 | `GET` | `/api/salesforce/opportunities/:name` | Pull SF opportunities |
+| `POST` | `/api/salesforce/import-contacts/:accountId` | Import contacts from Salesforce into RevFlare |
+
+### Email Performance & Compliance
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/email-stats` | Aggregate stats: sent/opened/replied rates, daily trend, per-campaign funnel, suppression count |
+| `GET` | `/api/email-suppression` | List suppressed addresses (bounces, complaints, unsubscribes) |
+| `DELETE` | `/api/email-suppression/:id` | Remove an address from the suppression list |
+| `GET` | `/api/public/track/:trackingId/pixel.gif` | **Public** — 1x1 tracking pixel; logs opens, no auth |
+| `GET` | `/api/public/unsubscribe/:trackingId` | **Public** — one-click unsubscribe landing page, no auth |
+| `POST` | `/api/public/unsubscribe/:trackingId` | **Public** — CAN-SPAM compliant one-click POST unsubscribe |
+
+### MCP (Model Context Protocol)
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/mcp/servers` | List user's connected MCP servers with cached tools |
+| `POST` | `/api/mcp/servers` | Add a new MCP server (with SSRF validation on URL) |
+| `DELETE` | `/api/mcp/servers/:id` | Remove an MCP server |
+| `POST` | `/api/mcp/servers/:id/toggle` | Enable/disable an MCP server |
+| `POST` | `/api/mcp/servers/:id/discover` | Run `tools/list` against the server and cache results |
+| `POST` | `/api/mcp/call` | Proxy a tool call to a connected MCP server |
+| `POST` | `/api/mcp` | **RevFlare as MCP server** — JSON-RPC 2.0 endpoint exposing 6 RevFlare tools to external AI agents |
+
+### Organizations & Teams
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/orgs` | List user's organizations with their role in each |
+| `POST` | `/api/orgs` | Create a new organization (caller becomes owner, org becomes active) |
+| `POST` | `/api/orgs/switch/:id` | Switch the user's active org (membership required) |
+| `GET` | `/api/orgs/:id/members` | List members of an org |
+| `POST` | `/api/orgs/:id/members` | Invite a user by email (owner/admin only) |
+| `DELETE` | `/api/orgs/:id/members/:email` | Remove a member (self, or owner/admin) |
+
+### Bulk Actions
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/bulk/score` | Recompute lead scores for up to 100 account IDs in one call (no AI) |
+| `POST` | `/api/bulk/research` | Generate `executive_brief` research for up to 10 accounts in parallel (DeepSeek R1) |
+
+### Persona Recommender
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/messaging/suggest-persona/:accountId` | Reply-rate-aware ranking of all persona/message-type combinations, returning top 5 with scoring factors |
 
 ### Sharing
 | Method | Path | Description |
@@ -360,8 +460,9 @@ All data is **user-scoped** via `user_email` column. **21 tables** total.
 
 ### Navigation
 ```
-Dashboard  Threats  Campaigns  |  Pipeline  Leads  Alerts  |  Team  Playbooks  Upload  |  Analytics    [Search]
+Dashboard  Threats  Campaigns  |  Pipeline  Leads  Alerts  |  Team  Playbooks  Email Stats  MCP  Teams  Upload  |  Analytics    [Search · ⌘K]
 ```
+A command palette (`⌘K` / `Ctrl+K`) opens anywhere for fuzzy-searchable fast navigation across routes, accounts, and actions. An **org switcher dropdown** is injected next to the search box when the user belongs to one or more organizations.
 
 ### Routes
 
@@ -373,12 +474,15 @@ Dashboard  Threats  Campaigns  |  Pipeline  Leads  Alerts  |  Team  Playbooks  U
 | `#/campaign/:id` | Campaign detail with batch generation + email preview |
 | `#/pipeline` | Opportunities table + ACV stats + AI auto-generate agent |
 | `#/lead-scores` | Lead scoring leaderboard with score bars and factors |
-| `#/alerts` | Alert/notification feed with severity, mark-as-read |
+| `#/alerts` | Alert/notification feed with severity, mark-as-read, product suggestion, and email drafting |
 | `#/team` | Team activity dashboard with leaderboard |
 | `#/playbooks` | Playbook CRUD with usage tracking |
+| `#/email-stats` | **Email performance dashboard** — sent/opened/replied metrics, daily trend, per-campaign funnel, suppression list management |
+| `#/mcp` | **MCP settings** — connected servers, tool discovery, quick-add presets, RevFlare-as-MCP-server endpoint |
+| `#/org` | **Teams** — create orgs, invite members, switch active org, manage shared playbooks |
 | `#/upload` | Excel upload with drag-and-drop |
 | `#/search/:query` | Semantic search results across all intel |
-| `#/analytics` | Usage analytics: page views, tab popularity, daily trends, per-user activity |
+| `#/analytics` | Usage analytics: page views, tab popularity, daily trends, per-user activity (admin only) |
 | `#/account/:id` | Account detail with 7 tabs (see below) |
 | `#/share/:token` | Public share view (no auth required) |
 
@@ -390,7 +494,7 @@ Dashboard  Threats  Campaigns  |  Pipeline  Leads  Alerts  |  Team  Playbooks  U
 | **Deep Research** | 4 research types with live 8-probe data |
 | **Threat Intel** | Account-matched incidents with email generation |
 | **Competitive Intel** | Full product catalog with live battlecard generation |
-| **Email Composer** | 5 personas × 5 message types with probe pre-fetch, recipient info display, and approval workflow (approve/reject before sending) |
+| **Email Composer** | 5 personas × 5 message types with probe pre-fetch (6h KV cache), recipient info display, approval workflow, an **AI chat refinement panel** for conversational rewrites, and a **reply-rate-aware recommender banner** that surfaces the top 3 persona/message-type combos for this account |
 | **Advanced** | ROI Calculator, Lookalike Accounts, Meeting Prep, Multi-Touch Sequences, Change Detection, A/B Email Testing, Voice Notes |
 | **History** | All generated research and messages |
 
@@ -572,7 +676,7 @@ Built-in page and tab visit tracking to understand how your team uses RevFlare.
 
 ## 18. Gmail Integration
 
-OAuth flow via Google Cloud Console credentials. Stored **encrypted** (AES-GCM) in D1 or as Worker secrets. Sends via Gmail API (`gmail.send` + `gmail.readonly` scopes). Auto-refreshes tokens. In-app wizard with no CLI needed.
+OAuth flow via Google Cloud Console credentials. Stored **encrypted** (AES-GCM) in D1 or as Worker secrets. Sends via Gmail API (`gmail.send` + `gmail.readonly` + `gmail.settings.basic` scopes). Auto-refreshes tokens. In-app wizard with no CLI needed.
 
 **Email Approval Workflow**: Every generated email (persona messages and campaign emails) starts with `pending_approval` status. Before sending via Gmail, users must:
 1. **Review recipient info** — account name, website, industry, location, account status, IT spend, and tech stack are displayed prominently
@@ -580,6 +684,8 @@ OAuth flow via Google Cloud Console credentials. Stored **encrypted** (AES-GCM) 
 3. **Send** — only approved emails can be sent via Gmail; the backend enforces this check
 
 For campaigns, bulk approve/reject actions and filter-by-status tabs allow efficient review of large email batches.
+
+**Signature Appending**: On first connection, RevFlare fetches the user's default Gmail signature via the Gmail Settings API and appends it to every outbound message (both persona emails and campaign emails), preserving the sender's identity and reducing manual editing.
 
 **Daily Email Limit (100/day per user)**: To protect email domain reputation and prevent abuse flags:
 - Each successful send is logged in `email_send_log` with an atomic check-and-insert (no race conditions)
@@ -623,19 +729,253 @@ Legacy plaintext tokens are transparently handled: decryption falls back to raw 
 
 ---
 
-## 22. Deployment
+## 22. MCP Integration
+
+RevFlare implements the **Model Context Protocol** (MCP) on both sides of the wire: as a **client** consuming external MCP servers for enrichment, and as a **server** exposing RevFlare data to external AI agents.
+
+### RevFlare as MCP Client
+
+The worker can connect to any JSON-RPC 2.0 MCP server over HTTP/HTTPS transport. Connected servers are queried during AI research, email generation, meeting prep, and contact lookup; their results are injected into the LLM prompt as additional context.
+
+**Built-in integration presets** (Quick-Add in `#/mcp`):
+
+| Server | Use Cases |
+|--------|-----------|
+| `netstrat` | Network metrics + account strategy lookup during research and email generation |
+| `google-workspace` | Calendar search for meeting prep; contacts search for account contacts |
+| `wiki` | Internal wiki search during research; competitive positioning lookup during email generation |
+| `cloudflare-docs` | Product documentation lookup during email generation |
+| `jira` | Issue search during research and meeting prep |
+
+Any other MCP server (internal or public) can be added by URL; `tools/list` is called automatically and the tool catalog is cached in `mcp_servers.tools_cache`.
+
+**Security**:
+- MCP server URLs are validated via `isValidMCPServerUrl()` — HTTPS only, no IPs, no localhost/private ranges, no `.local`/`.internal`/`.corp` TLDs, must have a real dotted hostname
+- Auth tokens are encrypted with the same AES-256-GCM pipeline used for OAuth tokens
+- Every tool call has a 15s abort timeout and is logged to `mcp_tool_calls` with duration and error state
+
+### RevFlare as MCP Server
+
+The endpoint `POST /api/mcp` speaks JSON-RPC 2.0 (MCP protocol version `2025-03-26`) and exposes **6 tools** to any external MCP client (Claude Desktop, Cursor, OpenCode, custom agents):
+
+| Tool | Purpose |
+|------|---------|
+| `lookup_account` | Search accounts by name or domain; returns industry, IT spend, tech stack, competitors |
+| `get_lead_score` | Return the AI-computed 0–100 lead score with scoring factors |
+| `get_account_research` | Return the latest 3 AI research reports for an account |
+| `get_pipeline` | Return pipeline opportunities with ACV, stage, and notes |
+| `get_alerts` | Return recent unread infrastructure + threat alerts |
+| `get_email_stats` | Return sent/opened/replied counts and rates |
+
+The endpoint is protected by Cloudflare Access (same JWT auth as the rest of the API), so external clients must include a valid Access token.
+
+---
+
+## 23. Email Tracking & Compliance
+
+RevFlare implements full CAN-SPAM compliant outbound email with transparent open tracking and automated suppression.
+
+### Open Tracking
+
+- Every persona message and campaign email gets a random 16-char `tracking_id` at generation time
+- A 1×1 transparent GIF is appended to the email body as `<img src="https://revflare.../api/public/track/{trackingId}/pixel.gif">`
+- When a recipient opens the email, the pixel request logs an `email_opens` row and atomically increments `open_count` on the source message
+- The pixel endpoint is under `/api/public/*` and bypasses Cloudflare Access
+- Opens are aggregated in the **Email Performance Dashboard** per message, per campaign, and globally
+
+### Unsubscribes
+
+- Every email body and `List-Unsubscribe` / `List-Unsubscribe-Post` header includes a one-click unsubscribe URL: `/api/public/unsubscribe/{trackingId}`
+- `GET` returns a branded confirmation landing page; `POST` (for Gmail/Yahoo one-click) is accepted without CSRF
+- Unsubscribing inserts into both `unsubscribes` and `email_suppression` tables so the recipient is blocked from future sends
+- The list is **per-user** — one rep's unsubscribe doesn't block another rep from sending to the same recipient
+
+### Suppression List
+
+`email_suppression` is consulted before every send. Reasons include:
+- `unsubscribe` — recipient clicked unsubscribe
+- `bounce` — Gmail API reported a permanent delivery failure
+- `invalid` — malformed address format
+- `complaint` — recipient marked as spam
+
+The dashboard at `#/email-stats` shows the full list with reason, timestamp, and a one-click remove button (in case of false-positive bounces).
+
+---
+
+## 24. AI Chat Email Refinement
+
+Instead of re-generating from scratch, users can conversationally refine any generated email via a chat panel on the Email Composer tab.
+
+### How it works
+
+1. User clicks **Refine with AI** on an approved or pending email
+2. Chat panel opens with the current email rendered as the initial assistant turn
+3. User types an instruction in plain English — e.g. "Cut 30% of length, lead with the DDoS incident, close with a 15-min Tuesday meeting ask"
+4. `POST /api/chat/message/:messageId` sends the instruction plus the full chat history to **Llama 3.3 70B** as a multi-turn conversation
+5. The model returns the fully rewritten email (including `Subject:` line)
+6. The backend extracts the new subject, updates `persona_messages.content` / `persona_messages.subject`, and **resets `approval_status` to `pending_approval`** so changes can be re-reviewed before sending
+7. Both the user instruction and AI response are persisted to `email_chat_history` for full auditability
+
+Works for both persona messages and campaign emails. Up to 20 prior turns are included in each call for context continuity.
+
+---
+
+## 25. Email Performance Dashboard
+
+Route: `#/email-stats` — a dedicated analytics surface for outbound email outreach.
+
+### Sections
+
+| Section | Details |
+|---------|---------|
+| **Top-line stats** | Total sent, total opened, total replied, open rate %, reply rate % |
+| **Daily usage** | Today's sent count vs. 100/day cap, with color-coded progress bar |
+| **Daily send trend** | Last 14 days of send volume as a bar chart |
+| **Per-campaign funnel** | For each of the last 20 campaigns: sent, opened, replied |
+| **Suppression list** | Searchable table of suppressed addresses with reason and remove button |
+
+All data is user-scoped — each rep sees only their own outreach performance.
+
+---
+
+## 26. Semantic Search
+
+Real semantic search via **@cf/baai/bge-base-en-v1.5** embeddings stored in D1 — replaces the previous keyword-only scoring.
+
+### How it works
+
+1. **Indexing** (`POST /api/search/index`): every research report and persona message is embedded into a 768-dimension Float32 vector via BGE. Vectors are stored as BLOB in `vectorize_cache` alongside the source text. Indexing runs in batches of 10 to respect Workers AI rate limits.
+2. **Querying** (`GET /api/search?q=...`): the query is embedded once, then scored against all cached vectors via cosine similarity. Results are filtered to similarity > 0.12 and returned top-20.
+3. **Hybrid ranking**: the final score is `0.7 × cosine_similarity + 0.3 × keyword_match`, which combines semantic understanding ("CDN displacement" matches "Akamai migration") with exact-term precision ("Shopify" always surfaces Shopify research).
+4. **Graceful fallback**: if embedding fails or rows predate the migration, the endpoint transparently falls back to pure keyword scoring and flags the response with `method: "keyword-only"`.
+
+Stats are indexed per-user; semantic search across tenant boundaries is never exposed.
+
+---
+
+## 27. AI Quality Optimizations
+
+### Probe Result Caching
+
+Every call to `POST /api/live-probe/:accountId` used to re-run all 8 probes (website scrape, headers, DNS, SEC, news, funding, Intricately, Radar). Probes are now cached in **Workers KV** (`THREAT_CACHE` binding) with a **6-hour TTL** and a day-bucketed key:
+
+```
+probe:v1:{accountId}:{domain}:{dayBucket}
+```
+
+- Cache writes are non-blocking via `ctx.waitUntil()` — callers never wait on the write
+- Cache hits return immediately with `cached: true` for UI signaling
+- `?fresh=1` query param bypasses the cache for intentional re-scans
+
+Net effect: email composer opens 10-50x faster for previously-probed accounts, and Browser Rendering quota is preserved for fresh targets.
+
+### Reply-Rate-Aware Persona Recommender
+
+`GET /api/messaging/suggest-persona/:accountId` ranks every (persona, message_type) combination by predicted reply rate for the given account.
+
+**Scoring formula**:
+- **Evidence**: weight same-industry outcomes 3x versus global outcomes (industry behavior is a stronger signal than global averages)
+- **Posterior reply rate**: Laplace-smoothed with priors `α=1, β=10` (≈9% baseline) so pairs with <5 sends don't dominate from lucky early hits
+- **Exploration bonus**: UCB-style `sqrt(2 * log(totalSent) / (pairSent + 1)) × 0.05` — surfaces under-explored combinations so the system keeps learning
+
+The Email Composer renders the top 3 as a clickable banner (`Suggested: BDR → Cold Email (4.1%)`), and clicking applies both the persona and the message type. As reply data accumulates, the ranking compounds — winners stay on top, underperformers rotate out.
+
+Data source: `persona_messages` table (`replied`, `open_count`). No manual labeling needed.
+
+---
+
+## 28. Command Palette & Bulk Actions
+
+### Command Palette (`⌘K` / `Ctrl+K`)
+
+A fuzzy-searchable overlay for fast navigation and common actions — inspired by Linear / Raycast.
+
+- **Keyboard-first**: `⌘K` opens, arrow keys navigate, `Enter` selects, `Esc` closes
+- **Searches across**: every nav route, up to 200 accounts (fetched lazily on first open), and global actions
+- **Fuzzy scorer**: exact match (1000 pts) > prefix match (500) > substring (200) > character-in-order (per-char score)
+- **Actions currently exposed**: `Create organization...`, `Re-index search`
+
+Adding new actions is a one-liner in `PALETTE_ROUTES` or the candidate list builder in `app.js`.
+
+### Bulk Actions on the Dashboard
+
+Every row on `#/` now has a checkbox. Selections persist across pagination so you can build up a batch across pages, then act on the full set.
+
+| Action | Endpoint | Cap | Notes |
+|--------|----------|-----|-------|
+| **Score Leads** | `POST /api/bulk/score` | 100 | Recomputes lead scores via the existing 8-factor model. No AI call — purely derived math. |
+| **Run Research** | `POST /api/bulk/research` | 10 | Generates `executive_brief` reports in parallel via DeepSeek R1. Capped low to protect AI quota. |
+
+A floating toolbar appears when any rows are selected (`N selected · Score · Research · Clear`). Clears automatically on success.
+
+---
+
+## 29. Organizations & Teams
+
+RevFlare is no longer just a single-user tool. Users can now create and join **organizations** for collaborative workflows.
+
+### Data Model
+
+| Table | Purpose |
+|-------|---------|
+| `organizations` | Top-level org with name, slug, description, settings, created_by |
+| `org_members` | Membership with roles: `owner`, `admin`, `member` |
+| `user_prefs` | Per-user preferences including `active_org_id` for org context switching |
+| `persona_performance` | (reserved) Future: industry × persona × message_type aggregates for global reply-rate trends |
+
+### Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/orgs` | List user's organizations with their role in each |
+| `POST` | `/api/orgs` | Create a new organization; caller becomes `owner` and the org becomes active |
+| `POST` | `/api/orgs/switch/:id` | Change the user's active org (membership enforced) |
+| `GET` | `/api/orgs/:id/members` | List members of an org (must be a member) |
+| `POST` | `/api/orgs/:id/members` | Invite a user by email (owner/admin only) |
+| `DELETE` | `/api/orgs/:id/members/:email` | Remove a member (self-removal or owner/admin). Last owner cannot be removed. |
+
+### Org Context Middleware
+
+After auth resolves `userEmail`, a second middleware calls `resolveActiveOrgId()` which:
+1. Reads `user_prefs.active_org_id` if set and the user is still a member
+2. Falls back to the earliest org they joined
+3. Fails open (`orgId = null`) if the `organizations` table doesn't yet exist (migration-opt-in)
+
+The result is stored as `c.var.orgId` and is available to every handler.
+
+### Shared Playbooks
+
+Playbooks gain an optional `org_id` column. On creation, the UI offers **"Share with organization"** — if checked and an active org exists, the playbook is attached to the org. On list, the user sees:
+- Their own playbooks (always)
+- Playbooks attached to their **active** org (shared across teammates)
+
+`POST /api/playbooks/:id/use` verifies membership before incrementing — a user cannot use another user's private playbook. Legacy playbooks (no `org_id`) behave exactly as before.
+
+### UI
+
+- **`#/org`** — dedicated Teams page: list orgs, view members, invite by email, remove, switch active org
+- **Nav switcher** — dropdown next to the search box shows current org + lists all orgs for 1-click switching. Hidden entirely if the user has no orgs.
+- **Command palette** — `Create organization...` action opens the create modal directly
+
+---
+
+## 30. Deployment
 
 ```bash
 git clone https://github.com/pottaarun/RevFlare.git
 cd RevFlare
 npm install
 
-# Create database and run all migrations
+# Create database and run all migrations (in order)
 wrangler d1 create revflare-db
 wrangler d1 execute revflare-db --remote --file=schema-full.sql
 wrangler d1 execute revflare-db --remote --file=migration-approval.sql
 wrangler d1 execute revflare-db --remote --file=migration-email-daily-limit.sql
 wrangler d1 execute revflare-db --remote --file=migration-improvements.sql
+wrangler d1 execute revflare-db --remote --file=migration-email-tracking.sql
+wrangler d1 execute revflare-db --remote --file=migration-mcp.sql
+wrangler d1 execute revflare-db --remote --file=migration-semantic-search.sql
+wrangler d1 execute revflare-db --remote --file=migration-orgs.sql
 
 # Set required secrets
 wrangler secret put ENC_SECRET              # Any random string for encryption
@@ -656,25 +996,31 @@ npm test
 
 ---
 
-## 23. File Structure
+## 31. File Structure
 
 ```
 revFlare/
 ├── src/
-│   ├── index.ts                    # Main Worker (~4,700 lines)
-│   ├── advanced-features.ts        # Lead scoring, ROI, lookalikes, sequences, etc.
-│   ├── advanced-features.test.ts   # Unit tests (vitest)
-│   └── threat-intel.ts             # Threat intelligence module (~465 lines)
+│   ├── index.ts                    # Main Worker (~6,100 lines)
+│   ├── advanced-features.ts        # Lead scoring, ROI, lookalikes, sequences, etc. (~265 lines)
+│   ├── advanced-features.test.ts   # Unit tests (vitest, ~167 lines)
+│   ├── mcp-client.ts               # MCP client + SSRF guard + integration map (~281 lines)
+│   └── threat-intel.ts             # Threat intelligence module (~482 lines)
 ├── public/
-│   ├── index.html                  # HTML shell + nav + Gmail wizard
-│   ├── app.js                      # Frontend SPA (~3,700 lines)
-│   └── styles.css                  # Design system (~1,400 lines)
+│   ├── index.html                  # HTML shell + nav + Gmail wizard (~160 lines)
+│   ├── app.js                      # Frontend SPA (~4,560 lines)
+│   └── styles.css                  # Design system (~1,650 lines)
 ├── screenshots/                    # App screenshots (auto-generated)
-├── schema-full.sql                 # Complete DB schema (21 tables + indexes)
+├── schema-full.sql                 # Complete DB schema (21 base tables + indexes)
 ├── schema.sql                      # Core DB schema (legacy)
 ├── migration-approval.sql          # Email approval workflow migration
 ├── migration-email-daily-limit.sql # Daily send limit tracking table
 ├── migration-improvements.sql      # Contacts, scheduled sends, reply tracking, indexes
+├── migration-email-tracking.sql    # Opens, unsubscribes, suppression, AI chat history
+├── migration-mcp.sql               # MCP servers + tool call audit log
+├── migration-semantic-search.sql   # BGE embedding BLOB column for true semantic search
+├── migration-orgs.sql              # Organizations, members, user prefs, persona_performance
+├── build_final_pptx.py             # Presentation builder (mock server + Playwright + PPTX)
 ├── seed.mjs                        # Excel seed script
 ├── wrangler.toml                   # Worker config
 ├── package.json                    # Dependencies + test scripts
@@ -682,5 +1028,5 @@ revFlare/
 └── README.md                       # This file
 ```
 
-**Total codebase**: ~10,500 lines across 10 source files.
+**Total codebase**: ~13,600 lines across 11 source files.
 **Dependencies**: hono, @cloudflare/puppeteer, @cloudflare/workers-types, typescript, wrangler, xlsx, vitest (dev)

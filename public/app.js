@@ -42,6 +42,64 @@ const api = {
 // ── State ──────────────────────────────────────────────────────────
 const S = { filters:{}, sort:'total_it_spend', order:'DESC', page:1, personas:null, activeTab:'overview', selPersona:null, selMsg:null };
 
+// ── Bulk selection state (dashboard multi-select) ─────────────────
+// Set of selected account IDs that persists across pagination.
+const bulkSel = new Set();
+function bulkClear() { bulkSel.clear(); bulkRenderToolbar(); refreshBulkCheckboxes(); }
+function bulkToggle(id) {
+  if (bulkSel.has(id)) bulkSel.delete(id); else bulkSel.add(id);
+  bulkRenderToolbar();
+}
+function refreshBulkCheckboxes() {
+  document.querySelectorAll('.bulk-cb').forEach(cb => {
+    const id = parseInt(cb.dataset.id);
+    cb.checked = bulkSel.has(id);
+    cb.closest('tr')?.classList.toggle('bulk-selected', cb.checked);
+  });
+  const head = document.querySelector('.bulk-cb-head');
+  if (head) {
+    const rows = document.querySelectorAll('.bulk-cb');
+    const checked = [...rows].filter(cb => cb.checked).length;
+    head.indeterminate = checked > 0 && checked < rows.length;
+    head.checked = rows.length > 0 && checked === rows.length;
+  }
+}
+function bulkRenderToolbar() {
+  let bar = document.getElementById('bulk-bar');
+  if (!bulkSel.size) { if (bar) bar.remove(); return; }
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.id = 'bulk-bar';
+    bar.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);z-index:999;background:var(--surface-elevated,#1e1f21);border:1px solid var(--border-accent,#7c7fff);border-radius:12px;padding:12px 16px;box-shadow:0 10px 40px rgba(0,0,0,0.5);display:flex;align-items:center;gap:12px;font-size:13px';
+    document.body.appendChild(bar);
+  }
+  bar.innerHTML = ''
+    + '<span style="color:var(--text-primary,#f7f8f8);font-weight:600">' + bulkSel.size + ' selected</span>'
+    + '<span style="color:var(--text-muted,#5a5e66);font-size:12px">\u2022</span>'
+    + '<button class="btn btn-ghost btn-sm" id="bulk-score" style="font-size:12px">Score Leads</button>'
+    + '<button class="btn btn-ghost btn-sm" id="bulk-research" style="font-size:12px">Run Research</button>'
+    + '<button class="btn btn-ghost btn-sm" id="bulk-clear" style="font-size:12px;color:var(--text-muted,#8a8f98)">Clear</button>';
+  document.getElementById('bulk-clear').onclick = bulkClear;
+  document.getElementById('bulk-score').onclick = async function() {
+    const btn = this; btn.disabled = true; btn.textContent = 'Scoring...';
+    try {
+      const r = await api.post('/bulk/score', { accountIds: [...bulkSel] });
+      toast('Scored ' + r.scored + ' account(s)', 'success');
+      bulkClear();
+      if (location.hash === '#/lead-scores') navigate();
+    } catch (e) { toast('Score failed: ' + e.message, 'error'); btn.disabled = false; btn.textContent = 'Score Leads'; }
+  };
+  document.getElementById('bulk-research').onclick = async function() {
+    if (bulkSel.size > 10) { toast('Bulk research capped at 10 accounts per run', 'error'); return; }
+    const btn = this; btn.disabled = true; btn.textContent = 'Generating...';
+    try {
+      const r = await api.post('/bulk/research', { accountIds: [...bulkSel], reportType: 'executive_brief' });
+      toast('Research generated for ' + r.succeeded + ' / ' + r.requested + ' accounts', r.failed ? 'error' : 'success');
+      bulkClear();
+    } catch (e) { toast('Research failed: ' + e.message, 'error'); btn.disabled = false; btn.textContent = 'Run Research'; }
+  };
+}
+
 // ── Per-account tab content cache (survives tab switches) ──────────
 // Keyed by account ID. Stores generated HTML, selections, and context.
 const tabCache = {};
@@ -140,6 +198,7 @@ function navigate(){
   else if(h==='#/analytics')renderAnalytics(m);
   else if(h==='#/email-stats')renderEmailStats(m);
   else if(h==='#/mcp')renderMCPSettings(m);
+  else if(h==='#/org')renderOrgs(m);
   else if(h.startsWith('#/account/'))renderAccount(m,h.split('/')[2]);
   else renderDashboard(m);
 }
@@ -349,13 +408,17 @@ const COLS=[
 
 async function loadAccounts(){
   const tbody=$('#tbody'),thead=$('#thead'),pag=$('#pag');if(!tbody)return;
-  tbody.innerHTML=`<tr><td colspan="${COLS.length}" style="text-align:center;padding:48px"><div class="spinner" style="margin:0 auto"></div></td></tr>`;
-  thead.innerHTML=COLS.map(c=>{const sorted=S.sort===c.k;return`<th class="${sorted?'sorted':''}" data-s="${c.k}" ${c.sort?'':'style="cursor:default"'}>${c.l}${sorted?(S.order==='ASC'?' \u2191':' \u2193'):''}</th>`;}).join('');
-  thead.querySelectorAll('th').forEach(th=>th.onclick=()=>{const c=COLS.find(x=>x.k===th.dataset.s);if(!c?.sort)return;if(S.sort===th.dataset.s)S.order=S.order==='DESC'?'ASC':'DESC';else{S.sort=th.dataset.s;S.order='DESC';}S.page=1;loadAccounts();});
+  const totalCols = COLS.length + 1; // extra for checkbox column
+  tbody.innerHTML=`<tr><td colspan="${totalCols}" style="text-align:center;padding:48px"><div class="spinner" style="margin:0 auto"></div></td></tr>`;
+  // Checkbox header + sortable columns.
+  thead.innerHTML = '<th style="width:36px;text-align:center;padding:0 4px"><input type="checkbox" class="bulk-cb-head" title="Select all on this page" /></th>'
+    + COLS.map(c=>{const sorted=S.sort===c.k;return`<th class="${sorted?'sorted':''}" data-s="${c.k}" ${c.sort?'':'style="cursor:default"'}>${c.l}${sorted?(S.order==='ASC'?' \u2191':' \u2193'):''}</th>`;}).join('');
+  thead.querySelectorAll('th[data-s]').forEach(th=>th.onclick=()=>{const c=COLS.find(x=>x.k===th.dataset.s);if(!c?.sort)return;if(S.sort===th.dataset.s)S.order=S.order==='DESC'?'ASC':'DESC';else{S.sort=th.dataset.s;S.order='DESC';}S.page=1;loadAccounts();});
   const p=new URLSearchParams({page:S.page,limit:50,sort:S.sort,order:S.order,...S.filters.search&&{search:S.filters.search},...S.filters.status&&{status:S.filters.status},...S.filters.industry&&{industry:S.filters.industry},...S.filters.country&&{country:S.filters.country}});
   try{
     const d=await api.get(`/accounts?${p}`);const mx=Math.max(...d.accounts.map(a=>a.total_it_spend||0),1);
-    tbody.innerHTML=d.accounts.length?d.accounts.map(a=>`<tr>
+    tbody.innerHTML=d.accounts.length?d.accounts.map(a=>`<tr${bulkSel.has(a.id)?' class="bulk-selected"':''}>
+      <td style="text-align:center;padding:0 4px"><input type="checkbox" class="bulk-cb" data-id="${a.id}"${bulkSel.has(a.id)?' checked':''} /></td>
       <td><a href="#/account/${a.id}" class="row-link">${esc(a.account_name)||'--'}</a></td>
       <td style="font-size:12px;color:var(--text-muted)">${esc(truncate(a.industry,24))||'--'}</td>
       <td>${statusPill(a.account_status)}</td>
@@ -364,11 +427,35 @@ async function loadAccounts(){
       <td><span class="stack-chip">${truncate(a.security_primary,18)||'--'}</span></td>
       <td style="color:var(--green);font-weight:700">${fmtD(a.current_monthly_fee)}</td>
       <td style="font-size:12px;color:var(--text-muted)">${timeAgo(a.last_activity)}</td>
-    </tr>`).join(''):`<tr><td colspan="${COLS.length}" style="text-align:center;padding:48px;color:var(--text-muted)">No accounts match</td></tr>`;
+    </tr>`).join(''):`<tr><td colspan="${totalCols}" style="text-align:center;padding:48px;color:var(--text-muted)">No accounts match</td></tr>`;
+
+    // Wire up per-row checkboxes
+    tbody.querySelectorAll('.bulk-cb').forEach(cb => {
+      cb.addEventListener('click', function(e) { e.stopPropagation(); });
+      cb.addEventListener('change', function() {
+        bulkToggle(parseInt(this.dataset.id));
+        this.closest('tr')?.classList.toggle('bulk-selected', this.checked);
+        refreshBulkCheckboxes();
+      });
+    });
+    // Header "select all on page"
+    const head = thead.querySelector('.bulk-cb-head');
+    if (head) head.addEventListener('change', function() {
+      const checked = this.checked;
+      tbody.querySelectorAll('.bulk-cb').forEach(cb => {
+        const id = parseInt(cb.dataset.id);
+        if (checked) bulkSel.add(id); else bulkSel.delete(id);
+        cb.checked = checked;
+        cb.closest('tr')?.classList.toggle('bulk-selected', checked);
+      });
+      bulkRenderToolbar();
+    });
+    refreshBulkCheckboxes();
+
     pag.innerHTML=`<span>Showing ${((S.page-1)*50+1).toLocaleString()}\u2013${Math.min(S.page*50,d.total).toLocaleString()} of ${d.total.toLocaleString()}</span><div class="pagination-btns"><button class="btn btn-ghost btn-sm" ${S.page<=1?'disabled':''} id="pp">Prev</button><button class="btn btn-ghost btn-sm" ${S.page>=d.pages?'disabled':''} id="np">Next</button></div>`;
     $('#pp')?.addEventListener('click',()=>{if(S.page>1){S.page--;loadAccounts();}});
     $('#np')?.addEventListener('click',()=>{if(S.page<d.pages){S.page++;loadAccounts();}});
-  }catch(e){tbody.innerHTML=`<tr><td colspan="${COLS.length}" style="text-align:center;padding:48px;color:var(--red)">${e.message}</td></tr>`;}
+  }catch(e){tbody.innerHTML=`<tr><td colspan="${totalCols}" style="text-align:center;padding:48px;color:var(--red)">${e.message}</td></tr>`;}
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -1016,6 +1103,8 @@ function tabMessaging(c,a){
   // Build HTML with string concatenation only (no template literals for dynamic content)
   var html = '<div class="fade-in">';
   html += '<div id="probe-status" style="margin-bottom:24px"></div>';
+  // Recommender banner: populated async after render, falls back silently on failure.
+  html += '<div id="persona-rec" style="margin-bottom:14px"></div>';
   html += '<div class="persona-section-title">1. Choose Your Persona</div>';
   html += '<div class="persona-grid" id="pg">';
   for (var i = 0; i < personaKeys.length; i++) {
@@ -1088,6 +1177,22 @@ function tabMessaging(c,a){
   }
 
   if (cache.selPersona) showMsgTypes(cache.selPersona);
+
+  // ── Populate the recommender banner (non-blocking) ──────────────
+  var recEl = document.getElementById('persona-rec');
+  if (recEl) {
+    renderPersonaRecommendations(a.id, recEl, function(persona, messageType) {
+      // Simulate a click on the recommended persona card, then select the msg type.
+      var card = document.querySelector('#pg .persona-card[data-p="' + persona + '"]');
+      if (card) card.click();
+      setTimeout(function() {
+        var btn = document.querySelector('.msg-type-btn[data-m="' + messageType + '"]');
+        if (btn) btn.click();
+        var genBtn = document.getElementById('gen-btn');
+        if (genBtn) genBtn.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }, 100);
+    });
+  }
 
   // ── Context save ────────────────────────────────────────────────
   var ctxEl = document.getElementById('ctx');
@@ -4076,3 +4181,384 @@ window.copyEl=function(btn,mode){
   else{const body=btn.closest('.output-card')?.querySelector('.output-body');text=body?.innerText||'';}
   navigator.clipboard.writeText(text).then(()=>{const orig=btn.innerHTML;btn.innerHTML=`${IC.copy} Copied!`;setTimeout(()=>btn.innerHTML=orig,2000);});
 };
+
+// ══════════════════════════════════════════════════════════════════
+// COMMAND PALETTE (⌘K / Ctrl+K)
+// Fuzzy-searchable overlay for fast navigation + actions. Items are
+// a mix of static routes, dynamic account lookups, and utilities.
+// ══════════════════════════════════════════════════════════════════
+
+const PALETTE_ROUTES = [
+  { label: 'Dashboard', hash: '#/', kind: 'nav', hint: 'All accounts' },
+  { label: 'Threats', hash: '#/threats', kind: 'nav', hint: 'Global threat intel' },
+  { label: 'Campaigns', hash: '#/campaigns', kind: 'nav', hint: 'Mass outreach' },
+  { label: 'Pipeline', hash: '#/pipeline', kind: 'nav', hint: 'Opportunities & ACV' },
+  { label: 'Lead Scores', hash: '#/lead-scores', kind: 'nav', hint: 'AI ranking' },
+  { label: 'Alerts', hash: '#/alerts', kind: 'nav', hint: 'Change + threat alerts' },
+  { label: 'Team', hash: '#/team', kind: 'nav', hint: 'Leaderboard' },
+  { label: 'Playbooks', hash: '#/playbooks', kind: 'nav', hint: 'Reusable templates' },
+  { label: 'Email Stats', hash: '#/email-stats', kind: 'nav', hint: 'Outreach performance' },
+  { label: 'MCP Integrations', hash: '#/mcp', kind: 'nav', hint: 'External + exposed tools' },
+  { label: 'Organizations', hash: '#/org', kind: 'nav', hint: 'Teams & members' },
+  { label: 'Upload', hash: '#/upload', kind: 'nav', hint: 'Import Salesforce data' },
+  { label: 'Analytics', hash: '#/analytics', kind: 'nav', hint: 'Usage analytics (admin)' },
+];
+
+// Lightweight fuzzy scorer: substring bonus, word-start bonus, per-char match.
+function paletteScore(label, q) {
+  if (!q) return 1;
+  const l = label.toLowerCase();
+  q = q.toLowerCase();
+  if (l === q) return 1000;
+  if (l.startsWith(q)) return 500;
+  if (l.includes(q)) return 200;
+  // Character-in-order match (sublinear fuzzy)
+  let pos = 0, score = 0;
+  for (const ch of q) {
+    const found = l.indexOf(ch, pos);
+    if (found < 0) return 0;
+    score += found === pos ? 10 : 1;
+    pos = found + 1;
+  }
+  return score;
+}
+
+let paletteAccountCache = null; // loaded lazily on first open
+async function paletteLoadAccounts() {
+  if (paletteAccountCache) return paletteAccountCache;
+  try {
+    const d = await api.get('/accounts?limit=200&sort=total_it_spend&order=DESC');
+    paletteAccountCache = d.accounts || [];
+  } catch { paletteAccountCache = []; }
+  return paletteAccountCache;
+}
+
+function paletteOpen() {
+  if (document.getElementById('cmd-palette')) return;
+  const overlay = document.createElement('div');
+  overlay.id = 'cmd-palette';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);backdrop-filter:blur(8px);z-index:99999;display:flex;align-items:flex-start;justify-content:center;padding-top:15vh';
+  overlay.innerHTML = ''
+    + '<div style="background:var(--surface-elevated,#1e1f21);border:1px solid var(--border-glass,rgba(255,255,255,0.08));border-radius:16px;width:min(640px,90vw);max-height:70vh;display:flex;flex-direction:column;box-shadow:0 40px 80px rgba(0,0,0,0.5);overflow:hidden">'
+    + '<div style="padding:14px 18px;border-bottom:1px solid var(--border-glass,rgba(255,255,255,0.06));display:flex;align-items:center;gap:10px">'
+    + '<span style="color:var(--text-muted,#8a8f98)">' + IC.search + '</span>'
+    + '<input id="cmd-input" type="text" placeholder="Search accounts, pages, actions..." style="flex:1;background:transparent;border:none;color:var(--text-primary,#f7f8f8);font-size:15px;outline:none;font-family:inherit" />'
+    + '<span style="font-size:10px;color:var(--text-muted,#5a5e66);background:var(--glass,rgba(255,255,255,0.04));border:1px solid var(--border-glass,rgba(255,255,255,0.08));border-radius:4px;padding:2px 6px">ESC</span>'
+    + '</div>'
+    + '<div id="cmd-results" style="flex:1;overflow-y:auto;padding:6px 0"></div>'
+    + '<div style="padding:8px 18px;border-top:1px solid var(--border-glass,rgba(255,255,255,0.06));font-size:10px;color:var(--text-muted,#5a5e66);display:flex;gap:16px;justify-content:space-between">'
+    + '<span>\u2191\u2193 navigate &nbsp;\u2022&nbsp; \u21B5 select &nbsp;\u2022&nbsp; ESC close</span>'
+    + '<span>\u2318K or Ctrl+K</span>'
+    + '</div></div>';
+  document.body.appendChild(overlay);
+
+  const input = document.getElementById('cmd-input');
+  const results = document.getElementById('cmd-results');
+  let selected = 0;
+  let items = [];
+
+  function render(list) {
+    items = list;
+    if (!list.length) {
+      results.innerHTML = '<div style="padding:32px;text-align:center;color:var(--text-muted,#8a8f98);font-size:13px">No matches</div>';
+      return;
+    }
+    results.innerHTML = list.map((it, i) => {
+      const badge = it.kind === 'account' ? 'Account' : it.kind === 'action' ? 'Action' : 'Page';
+      const badgeColor = it.kind === 'account' ? '#60a5fa' : it.kind === 'action' ? '#fbbf24' : '#a78bfa';
+      return '<div class="cmd-item" data-i="' + i + '" style="padding:10px 18px;cursor:pointer;display:flex;align-items:center;gap:12px;' + (i === selected ? 'background:var(--glass,rgba(124,127,255,0.08));border-left:2px solid var(--accent,#7c7fff)' : '') + '">'
+        + '<div style="flex:1;min-width:0">'
+        + '<div style="font-size:13px;color:var(--text-primary,#f7f8f8);font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(it.label) + '</div>'
+        + (it.hint ? '<div style="font-size:11px;color:var(--text-muted,#8a8f98);margin-top:2px">' + esc(it.hint) + '</div>' : '')
+        + '</div>'
+        + '<span style="font-size:9px;padding:2px 6px;background:' + badgeColor + '22;color:' + badgeColor + ';border-radius:4px;font-weight:600;text-transform:uppercase">' + badge + '</span>'
+        + '</div>';
+    }).join('');
+    results.querySelectorAll('.cmd-item').forEach(el => {
+      el.addEventListener('click', function() { paletteRun(items[parseInt(this.dataset.i)]); });
+      el.addEventListener('mouseenter', function() { selected = parseInt(this.dataset.i); render(items); });
+    });
+  }
+
+  async function update() {
+    const q = input.value.trim();
+    const candidates = [...PALETTE_ROUTES];
+    // Actions visible when empty; filterable.
+    candidates.push({ label: 'Create organization...', kind: 'action', action: 'create-org', hint: 'New team workspace' });
+    candidates.push({ label: 'Re-index search', kind: 'action', action: 'reindex', hint: 'Rebuild semantic search embeddings' });
+
+    const accounts = await paletteLoadAccounts();
+    for (const a of accounts) {
+      candidates.push({ label: a.account_name, kind: 'account', accountId: a.id, hint: (a.industry || '') + (a.billing_country ? ' \u2022 ' + a.billing_country : '') });
+    }
+
+    const scored = candidates
+      .map(it => ({ it, score: paletteScore(it.label, q) + (it.hint ? paletteScore(it.hint, q) * 0.3 : 0) }))
+      .filter(x => x.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 60)
+      .map(x => x.it);
+
+    selected = 0;
+    render(scored);
+  }
+
+  async function paletteRun(it) {
+    if (!it) return;
+    paletteClose();
+    if (it.kind === 'nav') { location.hash = it.hash; return; }
+    if (it.kind === 'account') { location.hash = '#/account/' + it.accountId; return; }
+    if (it.kind === 'action') {
+      if (it.action === 'create-org') { location.hash = '#/org'; setTimeout(() => document.getElementById('new-org-btn')?.click(), 300); }
+      else if (it.action === 'reindex') {
+        toast('Re-indexing search...');
+        try { const r = await api.post('/search/index'); toast('Indexed ' + r.indexed + ' items', 'success'); }
+        catch (e) { toast('Index failed: ' + e.message, 'error'); }
+      }
+    }
+  }
+
+  function paletteClose() { overlay.remove(); document.removeEventListener('keydown', onKey, true); }
+
+  function onKey(e) {
+    if (e.key === 'Escape') { e.preventDefault(); paletteClose(); return; }
+    if (e.key === 'ArrowDown') { e.preventDefault(); selected = Math.min(selected + 1, items.length - 1); render(items); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); selected = Math.max(selected - 1, 0); render(items); }
+    else if (e.key === 'Enter') { e.preventDefault(); paletteRun(items[selected]); }
+  }
+
+  document.addEventListener('keydown', onKey, true);
+  overlay.addEventListener('click', function(e) { if (e.target === overlay) paletteClose(); });
+  input.addEventListener('input', update);
+  update();
+  setTimeout(() => input.focus(), 50);
+}
+
+// Global keybinding for ⌘K / Ctrl+K
+document.addEventListener('keydown', function(e) {
+  const metaK = (e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K');
+  if (metaK) {
+    // Don't fire inside other inputs unless the palette itself isn't open.
+    if (document.getElementById('cmd-palette')) return;
+    e.preventDefault();
+    paletteOpen();
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════
+// TEAMS / ORGANIZATIONS PAGE — #/org
+// ══════════════════════════════════════════════════════════════════
+
+async function renderOrgs(c) {
+  c.innerHTML = '<div class="loading-state"><div class="spinner"></div>Loading organizations...</div>';
+  let me, orgs;
+  try {
+    [me, orgs] = await Promise.all([api.get('/me'), api.get('/orgs')]);
+  } catch (e) {
+    c.innerHTML = '<div class="empty-state"><p style="color:var(--red)">Failed to load: ' + esc(e.message) + '</p>'
+      + '<p style="color:var(--text-muted);font-size:12px;margin-top:8px">Make sure migration-orgs.sql has been applied.</p></div>';
+    return;
+  }
+
+  let h = '<div class="fade-in" style="max-width:900px;margin:0 auto;padding:28px 24px">';
+  h += '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:24px">';
+  h += '<div><h1 class="page-title">Organizations</h1>';
+  h += '<p class="page-subtitle">Share playbooks and collaborate with teammates.</p></div>';
+  h += '<button class="btn btn-primary btn-sm" id="new-org-btn">+ New Organization</button>';
+  h += '</div>';
+
+  if (!orgs.length) {
+    h += '<div class="empty-state" style="padding:48px 20px"><div style="font-size:32px;margin-bottom:12px;opacity:0.3">\u{1F3E2}</div>';
+    h += '<p>You\u2019re not part of any organization yet.</p>';
+    h += '<p style="color:var(--text-muted);font-size:12px;margin-top:4px">Create one to share playbooks and collaborate with teammates.</p></div>';
+  } else {
+    for (const o of orgs) {
+      const isActive = o.id === me.activeOrgId;
+      h += '<div class="d-card" style="margin-bottom:14px;padding:16px' + (isActive ? ';border-left:3px solid var(--green,#34d399)' : '') + '" data-oid="' + o.id + '">';
+      h += '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px">';
+      h += '<div style="flex:1;min-width:0">';
+      h += '<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">';
+      h += '<strong style="font-size:15px">' + esc(o.name) + '</strong>';
+      h += '<span style="font-size:10px;padding:2px 8px;background:var(--glass,rgba(255,255,255,0.04));border-radius:4px;color:var(--text-muted,#8a8f98)">' + esc(o.role) + '</span>';
+      if (isActive) h += '<span style="font-size:10px;padding:2px 8px;background:rgba(52,211,153,0.1);color:var(--green,#34d399);border-radius:4px;font-weight:600">ACTIVE</span>';
+      h += '</div>';
+      h += '<div style="font-size:11px;color:var(--text-muted)">Slug: <code>' + esc(o.slug) + '</code></div>';
+      if (o.description) h += '<div style="font-size:12px;color:var(--text-secondary);margin-top:6px">' + esc(o.description) + '</div>';
+      h += '</div>';
+      h += '<div style="display:flex;gap:6px;flex-shrink:0">';
+      if (!isActive) h += '<button class="btn btn-ghost btn-sm org-switch-btn" data-oid="' + o.id + '" style="font-size:11px">Switch to</button>';
+      h += '<button class="btn btn-ghost btn-sm org-members-btn" data-oid="' + o.id + '" style="font-size:11px">Members</button>';
+      h += '</div></div>';
+      h += '<div class="org-members-panel" id="org-members-' + o.id + '" style="display:none;margin-top:14px;padding-top:14px;border-top:1px solid var(--border-glass,rgba(255,255,255,0.06))"></div>';
+      h += '</div>';
+    }
+  }
+  h += '</div>';
+  c.innerHTML = h;
+
+  document.getElementById('new-org-btn')?.addEventListener('click', orgShowCreateModal);
+  document.querySelectorAll('.org-switch-btn').forEach(b => b.addEventListener('click', async function() {
+    const id = this.dataset.oid;
+    this.disabled = true; this.textContent = 'Switching...';
+    try { await api.post('/orgs/switch/' + id); toast('Active org switched', 'success'); navigate(); }
+    catch (e) { toast('Switch failed: ' + e.message, 'error'); this.disabled = false; this.textContent = 'Switch to'; }
+  }));
+  document.querySelectorAll('.org-members-btn').forEach(b => b.addEventListener('click', async function() {
+    const id = this.dataset.oid;
+    const panel = document.getElementById('org-members-' + id);
+    if (panel.style.display !== 'none') { panel.style.display = 'none'; return; }
+    panel.style.display = ''; panel.innerHTML = '<div class="spinner" style="margin:10px auto"></div>';
+    try {
+      const members = await api.get('/orgs/' + id + '/members');
+      let m = '<div style="font-size:11px;font-weight:700;color:var(--text-muted);text-transform:uppercase;margin-bottom:8px">Members (' + members.length + ')</div>';
+      m += '<div style="display:flex;flex-direction:column;gap:6px">';
+      for (const mem of members) {
+        m += '<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 10px;background:var(--glass,rgba(255,255,255,0.02));border-radius:6px">';
+        m += '<div><span style="font-size:12px;color:var(--text-primary);font-weight:500">' + esc(mem.user_email) + '</span>';
+        m += ' <span style="font-size:10px;color:var(--text-muted);margin-left:8px">' + esc(mem.role) + '</span></div>';
+        m += '<button class="btn btn-ghost btn-sm org-remove-member" data-oid="' + id + '" data-email="' + esc(mem.user_email) + '" style="font-size:10px;color:var(--red,#f87171)">Remove</button>';
+        m += '</div>';
+      }
+      m += '</div>';
+      m += '<div style="margin-top:12px;display:flex;gap:6px">';
+      m += '<input type="email" class="org-invite-email" data-oid="' + id + '" placeholder="email@company.com" style="flex:1;background:var(--glass,rgba(255,255,255,0.04));border:1px solid var(--border-glass,rgba(255,255,255,0.08));border-radius:6px;padding:6px 10px;font-size:12px;color:var(--text-primary);outline:none;font-family:inherit" />';
+      m += '<button class="btn btn-primary btn-sm org-invite-btn" data-oid="' + id + '" style="font-size:11px">Invite</button>';
+      m += '</div>';
+      panel.innerHTML = m;
+      panel.querySelectorAll('.org-invite-btn').forEach(btn => btn.addEventListener('click', async function() {
+        const oid = this.dataset.oid;
+        const input = panel.querySelector('.org-invite-email');
+        const inviteeEmail = input.value.trim();
+        if (!inviteeEmail) return;
+        this.disabled = true;
+        try { await api.post('/orgs/' + oid + '/members', { email: inviteeEmail }); toast('Invited ' + inviteeEmail, 'success'); input.value = ''; this.closest('.org-members-panel').previousElementSibling.querySelector('.org-members-btn').click(); setTimeout(() => document.querySelector('[data-oid="' + oid + '"].org-members-btn')?.click(), 100); }
+        catch (e) { toast('Invite failed: ' + e.message, 'error'); this.disabled = false; }
+      }));
+      panel.querySelectorAll('.org-remove-member').forEach(btn => btn.addEventListener('click', async function() {
+        const oid = this.dataset.oid;
+        const emailToRemove = this.dataset.email;
+        if (!confirm('Remove ' + emailToRemove + ' from this organization?')) return;
+        try { await fetch('/api/orgs/' + oid + '/members/' + encodeURIComponent(emailToRemove), { method: 'DELETE' }).then(r => r.ok ? null : r.json().then(j => { throw new Error(j.error); })); toast('Removed', 'success'); document.querySelector('[data-oid="' + oid + '"].org-members-btn')?.click(); setTimeout(() => document.querySelector('[data-oid="' + oid + '"].org-members-btn')?.click(), 50); }
+        catch (e) { toast('Remove failed: ' + e.message, 'error'); }
+      }));
+    } catch (e) { panel.innerHTML = '<div style="color:var(--red);font-size:12px">Failed: ' + esc(e.message) + '</div>'; }
+  }));
+}
+
+function orgShowCreateModal() {
+  const modal = document.createElement('div');
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);backdrop-filter:blur(8px);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px';
+  modal.innerHTML = ''
+    + '<div style="background:var(--surface-elevated,#1e1f21);border:1px solid var(--border-glass,rgba(255,255,255,0.08));border-radius:14px;max-width:480px;width:100%;padding:28px;color:var(--text-primary,#f7f8f8);font-family:inherit">'
+    + '<h2 style="font-size:18px;font-weight:700;margin-bottom:18px">Create Organization</h2>'
+    + '<label style="font-size:11px;font-weight:700;color:var(--text-muted,#8a8f98);text-transform:uppercase;display:block;margin-bottom:4px">Name</label>'
+    + '<input id="org-name-input" type="text" placeholder="Cloudflare EMEA Sales" style="width:100%;background:var(--glass,rgba(255,255,255,0.04));border:1px solid var(--border-glass,rgba(255,255,255,0.08));border-radius:8px;padding:10px 12px;font-size:13px;color:var(--text-primary);outline:none;font-family:inherit;box-sizing:border-box;margin-bottom:14px" />'
+    + '<label style="font-size:11px;font-weight:700;color:var(--text-muted,#8a8f98);text-transform:uppercase;display:block;margin-bottom:4px">Description <span style="font-weight:400">(optional)</span></label>'
+    + '<textarea id="org-desc-input" rows="2" placeholder="Shared playbooks for the EMEA enterprise team" style="width:100%;background:var(--glass,rgba(255,255,255,0.04));border:1px solid var(--border-glass,rgba(255,255,255,0.08));border-radius:8px;padding:10px 12px;font-size:13px;color:var(--text-primary);outline:none;font-family:inherit;box-sizing:border-box;resize:vertical;margin-bottom:18px"></textarea>'
+    + '<div style="display:flex;justify-content:flex-end;gap:8px">'
+    + '<button class="btn btn-ghost" id="org-cancel-btn">Cancel</button>'
+    + '<button class="btn btn-primary" id="org-create-btn">Create</button>'
+    + '</div></div>';
+  document.body.appendChild(modal);
+  modal.addEventListener('click', function(e) { if (e.target === modal) modal.remove(); });
+  document.getElementById('org-cancel-btn').onclick = function() { modal.remove(); };
+  document.getElementById('org-create-btn').onclick = async function() {
+    const name = document.getElementById('org-name-input').value.trim();
+    const description = document.getElementById('org-desc-input').value.trim();
+    if (name.length < 2) { toast('Name must be at least 2 characters', 'error'); return; }
+    this.disabled = true; this.textContent = 'Creating...';
+    try {
+      await api.post('/orgs', { name, description });
+      toast('Organization created', 'success');
+      modal.remove();
+      navigate();
+    } catch (e) { toast('Create failed: ' + e.message, 'error'); this.disabled = false; this.textContent = 'Create'; }
+  };
+  setTimeout(() => document.getElementById('org-name-input').focus(), 50);
+}
+
+// ══════════════════════════════════════════════════════════════════
+// PERSONA / MESSAGE-TYPE RECOMMENDER — inline banner in Email Composer
+// ══════════════════════════════════════════════════════════════════
+
+// Fetches /api/messaging/suggest-persona/:accountId and renders a clickable
+// "Try BDR → Cold Email (4.1% reply rate)" banner above the persona picker.
+// Safe to call multiple times — re-renders into the same container.
+async function renderPersonaRecommendations(accountId, container, onPick) {
+  if (!container) return;
+  container.innerHTML = '<div style="font-size:11px;color:var(--text-muted,#8a8f98);padding:6px 0">\u{1F52E} Analyzing reply-rate history...</div>';
+  try {
+    const rec = await api.get('/messaging/suggest-persona/' + accountId);
+    const top = (rec.top || []).slice(0, 3);
+    if (!top.length) { container.innerHTML = ''; return; }
+    let h = '<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:rgba(124,127,255,0.06);border:1px solid rgba(124,127,255,0.15);border-radius:8px;margin-bottom:10px;flex-wrap:wrap">';
+    h += '<span style="font-size:10px;font-weight:700;color:var(--accent,#7c7fff);text-transform:uppercase">\u{1F52E} Suggested</span>';
+    for (const s of top) {
+      h += '<button class="btn btn-ghost btn-sm persona-rec" data-p="' + esc(s.persona) + '" data-m="' + esc(s.messageType) + '" style="font-size:11px;padding:4px 8px" title="' + esc(s.reason) + '">'
+        + esc(s.personaLabel) + ' \u2192 ' + esc(s.messageTypeLabel)
+        + ' <span style="color:var(--text-muted,#8a8f98);margin-left:4px">' + (s.replyRate * 100).toFixed(1) + '%</span>'
+        + '</button>';
+    }
+    container.innerHTML = h;
+    container.querySelectorAll('.persona-rec').forEach(btn => btn.addEventListener('click', function() {
+      if (typeof onPick === 'function') onPick(this.dataset.p, this.dataset.m);
+    }));
+  } catch (e) {
+    container.innerHTML = '';
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// NAV: inject active-org badge next to the search box.
+// Hidden gracefully if the user is not in any org.
+// ══════════════════════════════════════════════════════════════════
+(function injectOrgSwitcher() {
+  function render() {
+    const navRight = document.querySelector('.nav-right');
+    if (!navRight || document.getElementById('org-switcher')) return;
+    api.get('/me').then(function(me) {
+      if (!me.orgs || !me.orgs.length) return;
+      const holder = document.createElement('div');
+      holder.id = 'org-switcher';
+      holder.style.cssText = 'position:relative;display:inline-block;margin-right:4px';
+      const active = me.activeOrg;
+      const label = active ? active.name : 'No org';
+      holder.innerHTML = '<button id="org-switch-btn" title="Switch organization" style="font-size:11px;padding:5px 10px;background:var(--glass,rgba(255,255,255,0.04));border:1px solid var(--border-glass,rgba(255,255,255,0.08));border-radius:var(--radius-md,6px);color:var(--text-secondary,#c4c9d4);cursor:pointer;font-family:inherit;display:inline-flex;align-items:center;gap:6px">'
+        + '<span>\u{1F3E2}</span>'
+        + '<span style="max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(label) + '</span>'
+        + '<span style="opacity:0.5;font-size:9px">\u25BE</span></button>';
+      navRight.insertBefore(holder, navRight.firstChild);
+      document.getElementById('org-switch-btn').addEventListener('click', function(e) {
+        e.preventDefault();
+        const existing = document.getElementById('org-switch-menu');
+        if (existing) { existing.remove(); return; }
+        const menu = document.createElement('div');
+        menu.id = 'org-switch-menu';
+        menu.style.cssText = 'position:absolute;top:100%;right:0;margin-top:4px;background:var(--surface-elevated,#1e1f21);border:1px solid var(--border-glass,rgba(255,255,255,0.08));border-radius:8px;min-width:200px;box-shadow:0 10px 30px rgba(0,0,0,0.4);z-index:1000;overflow:hidden';
+        let mh = '';
+        for (const o of me.orgs) {
+          const isActive = o.id === me.activeOrgId;
+          mh += '<button class="org-menu-item" data-oid="' + o.id + '" style="width:100%;text-align:left;padding:8px 12px;background:' + (isActive ? 'rgba(52,211,153,0.08)' : 'transparent') + ';border:none;color:' + (isActive ? 'var(--green,#34d399)' : 'var(--text-primary,#f7f8f8)') + ';font-size:12px;cursor:pointer;font-family:inherit;display:flex;justify-content:space-between;align-items:center">'
+            + '<span style="font-weight:' + (isActive ? '600' : '400') + '">' + esc(o.name) + '</span>'
+            + '<span style="font-size:10px;color:var(--text-muted,#8a8f98)">' + esc(o.role) + '</span>'
+            + '</button>';
+        }
+        mh += '<div style="border-top:1px solid var(--border-glass,rgba(255,255,255,0.06))"></div>';
+        mh += '<a href="#/org" style="display:block;padding:8px 12px;font-size:12px;color:var(--text-muted,#8a8f98);text-decoration:none">Manage organizations...</a>';
+        menu.innerHTML = mh;
+        holder.appendChild(menu);
+        menu.querySelectorAll('.org-menu-item').forEach(el => el.addEventListener('click', async function() {
+          const oid = this.dataset.oid;
+          try { await api.post('/orgs/switch/' + oid); location.reload(); }
+          catch (e) { toast('Switch failed: ' + e.message, 'error'); }
+        }));
+        document.addEventListener('click', function close(ev) {
+          if (!holder.contains(ev.target)) { menu.remove(); document.removeEventListener('click', close); }
+        });
+      });
+    }).catch(function() {});
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', render);
+  else render();
+})();
+

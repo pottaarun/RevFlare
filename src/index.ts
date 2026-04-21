@@ -128,7 +128,10 @@ interface ContactRow {
 interface CountResult { cnt: number; }
 interface AlertRow { id: number; account_id: number | null; alert_type: string; title: string; detail: string | null; severity: string; read: number; user_email: string; created_at: string; }
 
-const app = new Hono<{ Bindings: Bindings; Variables: { userEmail: string } }>();
+const app = new Hono<{
+  Bindings: Bindings;
+  Variables: { userEmail: string; orgId: number | null };
+}>();
 app.use('/api/*', cors({
   origin: (origin) => {
     if (!origin) return 'https://revflare.arunpotta1024.workers.dev'; // same-origin requests
@@ -264,15 +267,67 @@ app.use('/api/*', async (c, next) => {
   await next();
 });
 
+// ── Org context: resolve user's active org (if any) ───────────────
+// Reads user_prefs.active_org_id, falling back to the first org they belong to.
+// Fails open (orgId=null) if the orgs tables don't yet exist — the migration is
+// opt-in so the worker must not hard-fail when it hasn't been run.
+async function resolveActiveOrgId(db: D1Database, email: string): Promise<number | null> {
+  try {
+    const pref = await db.prepare('SELECT active_org_id FROM user_prefs WHERE user_email = ?').bind(email).first() as any;
+    if (pref?.active_org_id) {
+      // Confirm membership is still valid.
+      const m = await db.prepare('SELECT org_id FROM org_members WHERE org_id = ? AND user_email = ?').bind(pref.active_org_id, email).first();
+      if (m) return pref.active_org_id as number;
+    }
+    const any = await db.prepare('SELECT org_id FROM org_members WHERE user_email = ? ORDER BY joined_at ASC LIMIT 1').bind(email).first() as any;
+    return any?.org_id ?? null;
+  } catch {
+    // Table not present yet — treat as "no orgs configured".
+    return null;
+  }
+}
+
+app.use('/api/*', async (c, next) => {
+  if (c.req.path.startsWith('/api/public')) { c.set('orgId', null); await next(); return; }
+  const email = c.get('userEmail');
+  if (email) c.set('orgId', await resolveActiveOrgId(c.env.DB, email));
+  else c.set('orgId', null);
+  await next();
+});
+
 // ── Admin ──────────────────────────────────────────────────────────
 const ADMIN_EMAILS = new Set(['apotta@cloudflare.com']);
 function isAdmin(email: string): boolean { return ADMIN_EMAILS.has(email.toLowerCase().trim()); }
 
+async function getUserOrgs(db: D1Database, email: string): Promise<any[]> {
+  try {
+    const r = await db.prepare(
+      `SELECT o.id, o.name, o.slug, o.description, m.role, o.created_by
+         FROM organizations o JOIN org_members m ON m.org_id = o.id
+        WHERE m.user_email = ? ORDER BY m.joined_at ASC`
+    ).bind(email).all();
+    return (r.results as any[]) || [];
+  } catch {
+    return [];
+  }
+}
+
 app.get('/api/me', async (c) => {
-  // Override: include admin flag
   const email = c.get('userEmail');
-  const count = await c.env.DB.prepare('SELECT COUNT(*) as cnt FROM accounts WHERE user_email = ?').bind(email).first();
-  return c.json({ email, accountCount: (count as any)?.cnt || 0, isAdmin: isAdmin(email) });
+  const orgId = c.get('orgId');
+  const [count, orgs] = await Promise.all([
+    c.env.DB.prepare('SELECT COUNT(*) as cnt FROM accounts WHERE user_email = ?').bind(email).first(),
+    getUserOrgs(c.env.DB, email),
+  ]);
+  const active = orgs.find(o => o.id === orgId) || null;
+  return c.json({
+    email,
+    accountCount: (count as any)?.cnt || 0,
+    isAdmin: isAdmin(email),
+    orgs,
+    activeOrgId: orgId,
+    activeOrg: active,
+  });
 });
 
 // ── Page View Analytics ────────────────────────────────────────────
@@ -1694,7 +1749,119 @@ const PERSONA_CONFIGS: Record<string, {
 
 app.get('/api/personas', (c) => c.json(PERSONA_CONFIGS));
 
+// ── Persona / Message-Type Recommender ────────────────────────────
+// Thompson-sampling-flavored ranker over historical reply rates. Suggests the
+// (persona, message_type) pair most likely to generate a reply for a given
+// account, using (Laplace-smoothed reply rate) + (exploration bonus).
+app.get('/api/messaging/suggest-persona/:accountId', async (c) => {
+  const email = c.get('userEmail');
+  const accountId = c.req.param('accountId');
+
+  const account = await c.env.DB.prepare('SELECT id, industry FROM accounts WHERE id = ? AND user_email = ?')
+    .bind(accountId, email).first() as any;
+  if (!account) return c.json({ error: 'Account not found' }, 404);
+  const industry = account.industry || '';
+
+  // Pull sent/replied counts by (persona, message_type). Industry-specific AND
+  // global, so we can up-weight evidence from same-industry outcomes.
+  const industryStats = industry
+    ? await c.env.DB.prepare(
+        `SELECT pm.persona, pm.message_type,
+                COUNT(*) as sent,
+                SUM(CASE WHEN pm.replied = 1 THEN 1 ELSE 0 END) as replied,
+                SUM(CASE WHEN pm.open_count > 0 THEN 1 ELSE 0 END) as opened
+           FROM persona_messages pm
+           JOIN accounts a ON a.id = pm.account_id
+          WHERE a.industry = ? AND pm.user_email = ?
+          GROUP BY pm.persona, pm.message_type`
+      ).bind(industry, email).all()
+    : { results: [] };
+
+  const globalStats = await c.env.DB.prepare(
+    `SELECT persona, message_type,
+            COUNT(*) as sent,
+            SUM(CASE WHEN replied = 1 THEN 1 ELSE 0 END) as replied,
+            SUM(CASE WHEN open_count > 0 THEN 1 ELSE 0 END) as opened
+       FROM persona_messages
+      WHERE user_email = ?
+      GROUP BY persona, message_type`
+  ).bind(email).all();
+
+  // Build a map keyed by "persona|message_type".
+  type Stat = { sent: number; replied: number; opened: number };
+  const industryMap = new Map<string, Stat>();
+  for (const r of (industryStats.results || []) as any[]) {
+    industryMap.set(r.persona + '|' + r.message_type, { sent: r.sent || 0, replied: r.replied || 0, opened: r.opened || 0 });
+  }
+  const globalMap = new Map<string, Stat>();
+  let globalSent = 0;
+  for (const r of (globalStats.results || []) as any[]) {
+    globalMap.set(r.persona + '|' + r.message_type, { sent: r.sent || 0, replied: r.replied || 0, opened: r.opened || 0 });
+    globalSent += r.sent || 0;
+  }
+
+  // Score every (persona, message_type) combination from PERSONA_CONFIGS.
+  const ALPHA = 1, BETA = 10; // Laplace smoothing priors: (1, 10) ≈ 9% baseline
+  const suggestions: Array<{
+    persona: string; messageType: string; personaLabel: string; messageTypeLabel: string;
+    score: number; replyRate: number; industrySent: number; globalSent: number;
+    reason: string;
+  }> = [];
+
+  for (const [pKey, pCfg] of Object.entries(PERSONA_CONFIGS)) {
+    for (const mt of pCfg.messageTypes) {
+      const key = pKey + '|' + mt.id;
+      const ind = industryMap.get(key) || { sent: 0, replied: 0, opened: 0 };
+      const glb = globalMap.get(key) || { sent: 0, replied: 0, opened: 0 };
+
+      // Weighted evidence: industry data counts 3x (more relevant but lower volume).
+      const wSent = ind.sent * 3 + glb.sent;
+      const wReplied = ind.replied * 3 + glb.replied;
+
+      // Posterior reply rate with Laplace smoothing.
+      const replyRate = (wReplied + ALPHA) / (wSent + ALPHA + BETA);
+
+      // Exploration bonus: favors pairs with fewer total sends (UCB-style).
+      const explore = Math.sqrt(2 * Math.log(Math.max(globalSent, 2)) / (wSent + 1)) * 0.05;
+
+      const score = replyRate + explore;
+      let reason = '';
+      if (ind.sent >= 3) reason = `${Math.round(ind.replied / Math.max(ind.sent, 1) * 100)}% reply rate in ${industry || 'this industry'} (${ind.replied}/${ind.sent})`;
+      else if (glb.sent >= 3) reason = `${Math.round(glb.replied / Math.max(glb.sent, 1) * 100)}% reply rate overall (${glb.replied}/${glb.sent})`;
+      else reason = 'Low-volume pair — prioritized for exploration';
+
+      suggestions.push({
+        persona: pKey,
+        messageType: mt.id,
+        personaLabel: pCfg.name,
+        messageTypeLabel: mt.label,
+        score,
+        replyRate,
+        industrySent: ind.sent,
+        globalSent: glb.sent,
+        reason,
+      });
+    }
+  }
+
+  suggestions.sort((a, b) => b.score - a.score);
+  return c.json({
+    industry,
+    totalSentAcrossAll: globalSent,
+    top: suggestions.slice(0, 5),
+    all: suggestions,
+  });
+});
+
 // ── Pre-fetch live probes (called when Email Composer opens) ───────
+// Live probe cache: 6h TTL in KV. Key includes a day bucket so daily refreshes
+// still happen even if the account was probed yesterday.
+const PROBE_CACHE_TTL = 6 * 3600;
+function probeCacheKey(accountId: string | number, domain: string): string {
+  const dayBucket = Math.floor(Date.now() / (24 * 3600 * 1000));
+  return `probe:v1:${accountId}:${domain.toLowerCase()}:${dayBucket}`;
+}
+
 app.post('/api/live-probe/:accountId', async (c) => {
   const accountId = c.req.param('accountId');
   const account = await c.env.DB.prepare('SELECT * FROM accounts WHERE id = ? AND user_email = ?').bind(accountId, c.get("userEmail")).first();
@@ -1702,6 +1869,19 @@ app.post('/api/live-probe/:accountId', async (c) => {
 
   const domain = String(account.website || account.website_domain || '');
   const name = String(account.account_name);
+
+  // ── Cache check ──────────────────────────────────────────────────
+  // Allow `?fresh=1` to force a bypass when the rep explicitly wants new data.
+  const forceFresh = c.req.query('fresh') === '1';
+  const cacheKey = probeCacheKey(accountId, domain);
+  if (!forceFresh && domain) {
+    try {
+      const cached = await c.env.THREAT_CACHE.get(cacheKey, 'json') as any;
+      if (cached?.summary && cached?.probeData) {
+        return c.json({ ...cached, cached: true, cacheKey });
+      }
+    } catch (e) { console.error('probe cache read failed:', e); }
+  }
 
   // Run all probes in parallel, catch individually so partial results still return
   const results: Record<string, { status: string; data: any; ms: number }> = {};
@@ -1766,7 +1946,18 @@ app.post('/api/live-probe/:accountId', async (c) => {
     return { key: p.key, label: p.label, status: r.status, detail, ms: r.ms };
   });
 
-  return c.json({ summary, probeData: results, accountId: Number(accountId) });
+  const payload = { summary, probeData: results, accountId: Number(accountId) };
+
+  // Write back to cache. waitUntil so caller doesn't block on the write.
+  if (domain) {
+    try {
+      c.executionCtx.waitUntil(
+        c.env.THREAT_CACHE.put(cacheKey, JSON.stringify(payload), { expirationTtl: PROBE_CACHE_TTL })
+      );
+    } catch (e) { console.error('probe cache write failed:', e); }
+  }
+
+  return c.json({ ...payload, cached: false });
 });
 
 app.post('/api/messaging/:accountId', async (c) => {
@@ -4528,23 +4719,68 @@ app.post('/api/win-loss/:opportunityId', async (c) => {
 });
 
 // ── Playbooks ──────────────────────────────────────────────────────
+// Playbooks are visible if: you own them, OR they're attached to an org you're in.
 app.get('/api/playbooks', async (c) => {
-  const playbooks = await c.env.DB.prepare('SELECT * FROM playbooks ORDER BY usage_count DESC').all();
-  return c.json(playbooks.results);
+  const email = c.get('userEmail');
+  const orgId = c.get('orgId');
+  // Legacy rows (org_id column may not exist yet) — query defensively.
+  try {
+    if (orgId) {
+      const r = await c.env.DB.prepare(
+        `SELECT p.*,
+                CASE WHEN p.org_id IS NOT NULL THEN 'org' ELSE 'user' END as scope
+           FROM playbooks p
+          WHERE p.created_by = ? OR p.org_id = ?
+          ORDER BY p.usage_count DESC, p.created_at DESC`
+      ).bind(email, orgId).all();
+      return c.json(r.results);
+    } else {
+      const r = await c.env.DB.prepare(
+        `SELECT p.*, 'user' as scope FROM playbooks p WHERE p.created_by = ? ORDER BY p.usage_count DESC, p.created_at DESC`
+      ).bind(email).all();
+      return c.json(r.results);
+    }
+  } catch {
+    // Fallback for environments without the org_id column (migration not yet run).
+    const r = await c.env.DB.prepare('SELECT * FROM playbooks ORDER BY usage_count DESC').all();
+    return c.json(r.results);
+  }
 });
 
 app.post('/api/playbooks', async (c) => {
-  const { name, persona, industry, template } = await c.req.json<any>();
-  const r = await c.env.DB.prepare('INSERT INTO playbooks (name, persona, industry, template, created_by) VALUES (?,?,?,?,?)')
-    .bind(name, persona, industry || '', template, c.get('userEmail')).run();
-  return c.json({ id: r.meta.last_row_id });
+  const email = c.get('userEmail');
+  const orgId = c.get('orgId');
+  const { name, persona, industry, template, shareWithOrg } = await c.req.json<any>();
+  if (!name || !persona || !template) return c.json({ error: 'name, persona, template required' }, 400);
+  try {
+    // Attach to current org if the user opted in AND they have one.
+    if (shareWithOrg && orgId) {
+      const r = await c.env.DB.prepare(
+        'INSERT INTO playbooks (name, persona, industry, template, created_by, org_id) VALUES (?,?,?,?,?,?)'
+      ).bind(name, persona, industry || '', template, email, orgId).run();
+      return c.json({ id: r.meta.last_row_id, scope: 'org', orgId });
+    }
+    const r = await c.env.DB.prepare(
+      'INSERT INTO playbooks (name, persona, industry, template, created_by) VALUES (?,?,?,?,?)'
+    ).bind(name, persona, industry || '', template, email).run();
+    return c.json({ id: r.meta.last_row_id, scope: 'user' });
+  } catch (e: any) {
+    // Org column may not exist if migration-orgs.sql hasn't been run — fall back.
+    const r = await c.env.DB.prepare(
+      'INSERT INTO playbooks (name, persona, industry, template, created_by) VALUES (?,?,?,?,?)'
+    ).bind(name, persona, industry || '', template, email).run();
+    return c.json({ id: r.meta.last_row_id, scope: 'user' });
+  }
 });
 
 app.post('/api/playbooks/:id/use', async (c) => {
   const email = c.get('userEmail');
-  // Verify ownership or shared playbook before incrementing
+  const orgId = c.get('orgId');
+  // Verify the caller is allowed to use this playbook before incrementing.
   const pb = await c.env.DB.prepare('SELECT * FROM playbooks WHERE id = ?').bind(c.req.param('id')).first() as any;
   if (!pb) return c.json({ error: 'Playbook not found' }, 404);
+  const allowed = pb.created_by === email || (pb.org_id != null && pb.org_id === orgId);
+  if (!allowed) return c.json({ error: 'Not authorized to use this playbook' }, 403);
   await c.env.DB.prepare('UPDATE playbooks SET usage_count = usage_count + 1 WHERE id = ?').bind(c.req.param('id')).run();
   return c.json(pb);
 });
@@ -4940,13 +5176,58 @@ app.get('/api/chat/history/:messageId', async (c) => {
 });
 
 // ══════════════════════════════════════════════════════════════════
-// SEMANTIC SEARCH (AI Embeddings + D1 — lightweight RAG)
+// SEMANTIC SEARCH — BGE embeddings in D1, cosine similarity ranking
 // ══════════════════════════════════════════════════════════════════
 
-// Index content for search
+const EMBEDDING_MODEL = '@cf/baai/bge-base-en-v1.5'; // 768-dim
+const EMBEDDING_DIM = 768;
+
+// Float32 vector <-> D1 BLOB (ArrayBuffer).
+function vecToBlob(v: number[] | Float32Array): ArrayBuffer {
+  const f32 = v instanceof Float32Array ? v : new Float32Array(v);
+  // Return the underlying buffer (a copy, so the ArrayBuffer is exactly the right length).
+  const buf = new ArrayBuffer(f32.byteLength);
+  new Float32Array(buf).set(f32);
+  return buf;
+}
+function blobToVec(blob: unknown): Float32Array | null {
+  if (!blob) return null;
+  // D1 returns BLOBs as ArrayBuffer in Workers runtime.
+  if (blob instanceof ArrayBuffer) return new Float32Array(blob);
+  if (ArrayBuffer.isView(blob)) {
+    const view = blob as ArrayBufferView;
+    return new Float32Array(view.buffer, view.byteOffset, view.byteLength / 4);
+  }
+  return null;
+}
+function cosineSim(a: Float32Array, b: Float32Array): number {
+  const len = Math.min(a.length, b.length);
+  let dot = 0, na = 0, nb = 0;
+  for (let i = 0; i < len; i++) {
+    dot += a[i] * b[i];
+    na += a[i] * a[i];
+    nb += b[i] * b[i];
+  }
+  if (na === 0 || nb === 0) return 0;
+  return dot / (Math.sqrt(na) * Math.sqrt(nb));
+}
+
+// Embed a batch of strings through Workers AI BGE. Returns same-order vectors.
+async function embedBatch(ai: Ai, texts: string[]): Promise<number[][]> {
+  if (!texts.length) return [];
+  // BGE accepts {text: string[]} and returns {data: number[][]}.
+  // Truncate each input to ~3000 chars (well under the 512-token BGE limit).
+  const cleaned = texts.map(t => (t || '').slice(0, 3000));
+  const res = await ai.run(EMBEDDING_MODEL as any, { text: cleaned }) as any;
+  const data = res?.data || [];
+  // If model ever returns fewer results than inputs, pad with zero vectors.
+  while (data.length < cleaned.length) data.push(new Array(EMBEDDING_DIM).fill(0));
+  return data;
+}
+
+// POST /api/search/index — full re-index with embeddings.
 app.post('/api/search/index', async (c) => {
   const email = c.get('userEmail');
-  // Re-index all research + messages for this user
   await c.env.DB.prepare('DELETE FROM vectorize_cache WHERE user_email = ?').bind(email).run();
 
   const [research, messages] = await Promise.all([
@@ -4954,73 +5235,288 @@ app.post('/api/search/index', async (c) => {
     c.env.DB.prepare('SELECT id, account_id, subject, content, persona, message_type FROM persona_messages WHERE user_email = ?').bind(email).all(),
   ]);
 
-  const stmts: any[] = [];
+  // Normalize both content types into a single indexable stream.
+  type Item = { type: string; id: number; accountId: number | null; text: string };
+  const items: Item[] = [];
   for (const r of research.results as any[]) {
-    stmts.push(c.env.DB.prepare('INSERT INTO vectorize_cache (content_type, content_id, content_text, account_id, user_email) VALUES (?,?,?,?,?)')
-      .bind('research', r.id, (r.title || r.report_type) + ': ' + (r.content || '').slice(0, 2000), r.account_id, email));
+    const text = (r.title || r.report_type || '') + ': ' + (r.content || '').slice(0, 2500);
+    items.push({ type: 'research', id: r.id, accountId: r.account_id, text });
   }
   for (const m of messages.results as any[]) {
-    stmts.push(c.env.DB.prepare('INSERT INTO vectorize_cache (content_type, content_id, content_text, account_id, user_email) VALUES (?,?,?,?,?)')
-      .bind('message', m.id, (m.persona || '') + ' ' + (m.message_type || '') + ': ' + (m.subject || '') + ' ' + (m.content || '').slice(0, 2000), m.account_id, email));
+    const text = `${m.persona || ''} ${m.message_type || ''}: ${m.subject || ''} ${(m.content || '').slice(0, 2500)}`;
+    items.push({ type: 'message', id: m.id, accountId: m.account_id, text });
   }
 
-  // Batch insert
-  for (let i = 0; i < stmts.length; i += 50) {
-    await c.env.DB.batch(stmts.slice(i, i + 50));
+  if (!items.length) return c.json({ indexed: 0, research: 0, messages: 0 });
+
+  // Embed in batches of 10 (Workers AI BGE accepts small batches well).
+  const BATCH = 10;
+  let indexed = 0;
+  for (let i = 0; i < items.length; i += BATCH) {
+    const slice = items.slice(i, i + BATCH);
+    let vectors: number[][] = [];
+    try {
+      vectors = await embedBatch(c.env.AI, slice.map(x => x.text));
+    } catch (e) {
+      console.error('embedBatch failed, inserting without vectors:', e);
+      vectors = slice.map(() => []);
+    }
+    const stmts = slice.map((item, j) => {
+      const vec = vectors[j] || [];
+      const blob = vec.length === EMBEDDING_DIM ? vecToBlob(vec) : null;
+      return c.env.DB.prepare(
+        'INSERT INTO vectorize_cache (content_type, content_id, content_text, embedding, embedding_model, account_id, user_email) VALUES (?,?,?,?,?,?,?)'
+      ).bind(item.type, item.id, item.text.slice(0, 2000), blob as any, blob ? EMBEDDING_MODEL : '', item.accountId, email);
+    });
+    try { await c.env.DB.batch(stmts); indexed += stmts.length; }
+    catch (e) { console.error('batch insert failed:', e); }
   }
 
-  return c.json({ indexed: stmts.length, research: research.results.length, messages: messages.results.length });
+  return c.json({ indexed, research: research.results.length, messages: messages.results.length });
 });
 
-// Semantic search using AI for relevance scoring
+// GET /api/search?q=... — hybrid semantic + keyword scoring.
 app.get('/api/search', async (c) => {
   const email = c.get('userEmail');
-  const query = c.req.query('q') || '';
+  const query = (c.req.query('q') || '').trim();
   if (!query) return c.json({ results: [] });
 
-  // Get all cached content
-  const cache = await c.env.DB.prepare('SELECT * FROM vectorize_cache WHERE user_email = ? ORDER BY created_at DESC LIMIT 500').bind(email).all();
+  // Cap the scan. With 768*4=3072 bytes per row + text, 2000 rows fits comfortably
+  // in a single D1 query and a few MB of Worker memory.
+  const cache = await c.env.DB.prepare(
+    'SELECT id, content_type, content_id, content_text, embedding, account_id, created_at FROM vectorize_cache WHERE user_email = ? ORDER BY created_at DESC LIMIT 2000'
+  ).bind(email).all();
 
-  // Simple keyword search (fast, no AI needed for basic queries)
+  if (!cache.results.length) return c.json({ results: [], query, totalIndexed: 0, method: 'empty' });
+
+  // 1) Embed the query (1 call, cached for the request).
+  let qVec: Float32Array | null = null;
+  try {
+    const [v] = await embedBatch(c.env.AI, [query]);
+    if (v && v.length === EMBEDDING_DIM) qVec = new Float32Array(v);
+  } catch (e) { console.error('query embed failed:', e); }
+
   const queryLower = query.toLowerCase();
-  const keywords = queryLower.split(/\s+/).filter((w: string) => w.length > 2);
+  const keywords = queryLower.split(/\s+/).filter(w => w.length > 2);
 
-  const scored = (cache.results as any[]).map(item => {
+  // 2) Score: cosine similarity + keyword bonus (hybrid ranker).
+  const scored = (cache.results as any[]).map((item) => {
     const text = (item.content_text || '').toLowerCase();
-    let score = 0;
-    for (const kw of keywords) {
-      if (text.includes(kw)) score += 10;
-      // Boost title/subject matches
-      const firstLine = text.split(':')[0] || '';
-      if (firstLine.includes(kw)) score += 20;
+    let kwScore = 0;
+    for (const kw of keywords) if (text.includes(kw)) kwScore += 0.05;
+    if (text.includes(queryLower)) kwScore += 0.2;
+
+    let semScore = 0;
+    if (qVec) {
+      const vec = blobToVec(item.embedding);
+      if (vec && vec.length === EMBEDDING_DIM) semScore = cosineSim(qVec, vec);
     }
-    // Exact phrase match
-    if (text.includes(queryLower)) score += 50;
-    return { ...item, score };
-  }).filter(item => item.score > 0).sort((a: any, b: any) => b.score - a.score).slice(0, 20);
 
-  // If few keyword results, use AI to re-rank
-  if (scored.length < 5 && cache.results.length > 0) {
-    const candidates = (cache.results as any[]).slice(0, 50).map((item, i) => `[${i}] ${(item.content_text || '').slice(0, 200)}`).join('\n');
-    try {
-      const aiResult = await runAI(c.env.AI, FAST_MODEL,
-        'You are a search engine. Given a query and a list of documents, return the indices of the most relevant documents as a JSON array of numbers. Return ONLY a JSON array like [0, 5, 12].',
-        `Query: "${query}"\n\nDocuments:\n${candidates}`
-      );
-      const indices = JSON.parse(aiResult.match(/\[[\d,\s]+\]/)?.[0] || '[]');
-      for (const idx of indices) {
-        if (idx < cache.results.length) {
-          const item = cache.results[idx] as any;
-          if (!scored.find((s: any) => s.id === item.id)) {
-            scored.push({ ...item, score: 30 - indices.indexOf(idx) });
-          }
-        }
-      }
-      scored.sort((a: any, b: any) => b.score - a.score);
-    } catch (e) { console.error('Operation failed:', e); }
+    // Weighted combo: 70% semantic, 30% keyword when we have both.
+    // Falls back to pure keyword scoring when embeddings are missing (legacy rows).
+    const score = qVec && semScore > 0 ? (semScore * 0.7 + kwScore * 0.3) : kwScore;
+    return { ...item, embedding: undefined, score, semScore, kwScore };
+  }).filter(x => x.score > 0.12).sort((a, b) => b.score - a.score).slice(0, 20);
+
+  return c.json({
+    results: scored,
+    query,
+    totalIndexed: cache.results.length,
+    method: qVec ? 'semantic+keyword' : 'keyword-only',
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════
+// ORGANIZATIONS / TEAMS — multi-user collaboration primitives
+// ══════════════════════════════════════════════════════════════════
+
+// URL-safe slug generator; falls back to epoch if input is empty.
+function orgSlugify(name: string): string {
+  const base = name.toLowerCase().trim()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40);
+  return base || `org-${Date.now()}`;
+}
+
+// Checks that the caller is a member of `orgId`. Returns their role, or null.
+async function getOrgRole(db: D1Database, orgId: number | string, email: string): Promise<string | null> {
+  try {
+    const r = await db.prepare('SELECT role FROM org_members WHERE org_id = ? AND user_email = ?').bind(orgId, email).first() as any;
+    return r?.role || null;
+  } catch {
+    return null;
   }
+}
 
-  return c.json({ results: scored.slice(0, 20), query, totalIndexed: cache.results.length });
+app.get('/api/orgs', async (c) => {
+  const email = c.get('userEmail');
+  return c.json(await getUserOrgs(c.env.DB, email));
+});
+
+app.post('/api/orgs', async (c) => {
+  const email = c.get('userEmail');
+  const { name, description } = await c.req.json<{ name: string; description?: string }>().catch(() => ({ name: '', description: '' }));
+  if (!name || name.trim().length < 2) return c.json({ error: 'Name must be at least 2 characters' }, 400);
+
+  // Generate a unique slug. Append a random suffix on collision.
+  let slug = orgSlugify(name);
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      const r = await c.env.DB.prepare(
+        'INSERT INTO organizations (name, slug, description, created_by) VALUES (?,?,?,?)'
+      ).bind(name.trim(), slug, description || '', email).run();
+      const orgId = r.meta.last_row_id as number;
+      await c.env.DB.prepare(
+        'INSERT INTO org_members (org_id, user_email, role, invited_by) VALUES (?,?,?,?)'
+      ).bind(orgId, email, 'owner', email).run();
+      // Make this the active org on creation.
+      await c.env.DB.prepare(
+        'INSERT INTO user_prefs (user_email, active_org_id) VALUES (?,?) ON CONFLICT(user_email) DO UPDATE SET active_org_id=excluded.active_org_id, updated_at=CURRENT_TIMESTAMP'
+      ).bind(email, orgId).run();
+      return c.json({ id: orgId, name: name.trim(), slug, description: description || '', role: 'owner' });
+    } catch (e: any) {
+      if (String(e.message || '').includes('UNIQUE')) {
+        slug = orgSlugify(name) + '-' + Math.random().toString(36).slice(2, 6);
+        continue;
+      }
+      console.error('create org failed:', e);
+      return c.json({ error: 'Failed to create organization: ' + (e.message || 'unknown') }, 500);
+    }
+  }
+  return c.json({ error: 'Could not generate a unique slug; try a different name.' }, 500);
+});
+
+app.post('/api/orgs/switch/:id', async (c) => {
+  const email = c.get('userEmail');
+  const orgId = c.req.param('id');
+  const role = await getOrgRole(c.env.DB, orgId, email);
+  if (!role) return c.json({ error: 'Not a member of this organization' }, 403);
+  await c.env.DB.prepare(
+    'INSERT INTO user_prefs (user_email, active_org_id) VALUES (?,?) ON CONFLICT(user_email) DO UPDATE SET active_org_id=excluded.active_org_id, updated_at=CURRENT_TIMESTAMP'
+  ).bind(email, orgId).run();
+  return c.json({ success: true, activeOrgId: Number(orgId), role });
+});
+
+app.get('/api/orgs/:id/members', async (c) => {
+  const email = c.get('userEmail');
+  const orgId = c.req.param('id');
+  if (!(await getOrgRole(c.env.DB, orgId, email))) return c.json({ error: 'Not a member' }, 403);
+  const r = await c.env.DB.prepare('SELECT user_email, role, invited_by, joined_at FROM org_members WHERE org_id = ? ORDER BY joined_at ASC').bind(orgId).all();
+  return c.json(r.results);
+});
+
+app.post('/api/orgs/:id/members', async (c) => {
+  const email = c.get('userEmail');
+  const orgId = c.req.param('id');
+  const role = await getOrgRole(c.env.DB, orgId, email);
+  if (role !== 'owner' && role !== 'admin') return c.json({ error: 'Only owners/admins can invite' }, 403);
+  const { email: invitee, role: newRole } = await c.req.json<{ email: string; role?: string }>().catch(() => ({ email: '', role: 'member' }));
+  if (!invitee || !invitee.includes('@')) return c.json({ error: 'Valid email required' }, 400);
+  const clean = invitee.toLowerCase().trim();
+  const safeRole = ['owner', 'admin', 'member'].includes(newRole || '') ? newRole! : 'member';
+  try {
+    await c.env.DB.prepare(
+      'INSERT INTO org_members (org_id, user_email, role, invited_by) VALUES (?,?,?,?)'
+    ).bind(orgId, clean, safeRole, email).run();
+    return c.json({ success: true, email: clean, role: safeRole });
+  } catch (e: any) {
+    if (String(e.message || '').includes('UNIQUE')) return c.json({ error: 'Already a member' }, 409);
+    return c.json({ error: e.message || 'Invite failed' }, 500);
+  }
+});
+
+app.delete('/api/orgs/:id/members/:email', async (c) => {
+  const caller = c.get('userEmail');
+  const orgId = c.req.param('id');
+  const target = decodeURIComponent(c.req.param('email') || '').toLowerCase().trim();
+  const callerRole = await getOrgRole(c.env.DB, orgId, caller);
+  if (!callerRole) return c.json({ error: 'Not a member' }, 403);
+  // Anyone can remove themselves. Only owners/admins can remove others.
+  if (target !== caller && callerRole !== 'owner' && callerRole !== 'admin') {
+    return c.json({ error: 'Only owners/admins can remove other members' }, 403);
+  }
+  // Don't allow removal of the last owner.
+  const targetRole = await getOrgRole(c.env.DB, orgId, target);
+  if (targetRole === 'owner') {
+    const ownerCount = await c.env.DB.prepare('SELECT COUNT(*) as cnt FROM org_members WHERE org_id = ? AND role = ?').bind(orgId, 'owner').first() as any;
+    if ((ownerCount?.cnt || 0) <= 1) return c.json({ error: 'Cannot remove the last owner' }, 400);
+  }
+  await c.env.DB.prepare('DELETE FROM org_members WHERE org_id = ? AND user_email = ?').bind(orgId, target).run();
+  // If the removed user had this org active, clear it.
+  await c.env.DB.prepare('UPDATE user_prefs SET active_org_id = NULL WHERE user_email = ? AND active_org_id = ?').bind(target, orgId).run();
+  return c.json({ success: true });
+});
+
+// ══════════════════════════════════════════════════════════════════
+// BULK OPERATIONS — dashboard multi-select actions
+// ══════════════════════════════════════════════════════════════════
+
+// POST /api/bulk/score — recompute lead scores for specified accountIds.
+// Cheap (no AI call, just derived math), capped at 100 per call.
+app.post('/api/bulk/score', async (c) => {
+  const email = c.get('userEmail');
+  const { accountIds } = await c.req.json<{ accountIds: number[] }>().catch(() => ({ accountIds: [] }));
+  if (!Array.isArray(accountIds) || !accountIds.length) return c.json({ error: 'accountIds[] required' }, 400);
+  const ids = accountIds.slice(0, 100).filter(n => Number.isFinite(Number(n))).map(Number);
+  if (!ids.length) return c.json({ error: 'No valid account IDs' }, 400);
+
+  const placeholders = ids.map(() => '?').join(',');
+  const accounts = await c.env.DB.prepare(
+    `SELECT * FROM accounts WHERE id IN (${placeholders}) AND user_email = ?`
+  ).bind(...ids, email).all();
+
+  const scored: Array<{ id: number; score: number; factors: any[] }> = [];
+  const stmts: any[] = [];
+  for (const a of (accounts.results as any[])) {
+    const { score, factors } = calculateLeadScore(a);
+    scored.push({ id: a.id, score, factors });
+    stmts.push(
+      c.env.DB.prepare(
+        'INSERT INTO lead_scores (account_id, score, factors, updated_at) VALUES (?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(account_id) DO UPDATE SET score=excluded.score, factors=excluded.factors, updated_at=CURRENT_TIMESTAMP'
+      ).bind(a.id, score, JSON.stringify(factors))
+    );
+  }
+  if (stmts.length) await c.env.DB.batch(stmts);
+  return c.json({ scored: scored.length, results: scored });
+});
+
+// POST /api/bulk/research — kick off research for specified accounts.
+// AI-backed, so capped hard at 10 per call to avoid quota pressure.
+app.post('/api/bulk/research', async (c) => {
+  const email = c.get('userEmail');
+  const { accountIds, reportType } = await c.req.json<{ accountIds: number[]; reportType?: string }>().catch(() => ({ accountIds: [], reportType: '' }));
+  if (!Array.isArray(accountIds) || !accountIds.length) return c.json({ error: 'accountIds[] required' }, 400);
+  const ids = accountIds.slice(0, 10).filter(n => Number.isFinite(Number(n))).map(Number);
+  const type = (reportType || 'executive_brief').toString().slice(0, 40);
+
+  const placeholders = ids.map(() => '?').join(',');
+  const accounts = await c.env.DB.prepare(
+    `SELECT * FROM accounts WHERE id IN (${placeholders}) AND user_email = ?`
+  ).bind(...ids, email).all();
+
+  // Run in parallel but independently; never let one failure kill the batch.
+  const results = await Promise.all((accounts.results as any[]).map(async (a) => {
+    try {
+      const ctx = buildAccountContext(a);
+      const system = `You are a Cloudflare sales analyst. Write a concise ${type.replace(/_/g, ' ')} for the account below. Be specific, data-driven, 200-400 words.`;
+      const prompt = `Account data:\n${ctx.slice(0, 9000)}\n\nGenerate the report now.`;
+      const content = await runAI(c.env.AI, RESEARCH_MODEL, system, prompt);
+      await c.env.DB.prepare(
+        'INSERT INTO research_reports (account_id, report_type, title, content, user_email) VALUES (?,?,?,?,?)'
+      ).bind(a.id, type, `${type.replace(/_/g, ' ')} — ${a.account_name}`, content, email).run();
+      return { id: a.id, account_name: a.account_name, ok: true };
+    } catch (e: any) {
+      return { id: a.id, account_name: a.account_name, ok: false, error: e.message || 'failed' };
+    }
+  }));
+
+  return c.json({
+    requested: ids.length,
+    succeeded: results.filter(r => r.ok).length,
+    failed: results.filter(r => !r.ok).length,
+    results,
+  });
 });
 
 // ══════════════════════════════════════════════════════════════════

@@ -261,12 +261,46 @@ All data is **user-scoped** via `user_email` column (with org-scoping available 
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/api/accounts/clear` | Clear user's data |
-| `POST` | `/api/accounts/upload` | Batch upload from Excel |
+| `POST` | `/api/accounts/upload` | Batch upload from Excel (header-normalized; skips nameless rows) |
 | `GET` | `/api/accounts` | Paginated list with search/filter/sort |
 | `GET` | `/api/accounts/:id` | Full account detail |
 | `GET` | `/api/filters` | Filter dropdown values |
 | `GET` | `/api/stats` | Dashboard aggregates |
 | `GET` | `/api/platform-stats` | Global platform metrics |
+
+#### Account Upload Pipeline (how `.xlsx` files are parsed)
+
+RevFlare ingests Salesforce / territory-planning `.xlsx` exports through a two-stage,
+fault-tolerant pipeline. Real exports are messy — multiple tabs, a merged title row
+sitting *above* the headers, and inconsistent column names — so **both** the browser
+and the Worker defend against malformed input.
+
+**Stage 1 — Browser (`public/app.js` → `pickAccountSheet`)**
+Parsing runs client-side with SheetJS so large workbooks never hit the Worker whole:
+1. **Sheet selection** — *every* sheet is scanned, not just `SheetNames[0]`. Summary /
+   "Read Me" tabs are ignored; the sheet with the most data rows that also contains a
+   recognizable name column wins.
+2. **Header-row detection** — the header row is located by scanning the first 25 rows
+   for a name-like column (`Account`, `Account Name`, `Name`, `Company`, `Company Name`
+   — case- and whitespace-insensitive). Title/banner rows above the headers are skipped.
+3. **Row extraction** — only rows *below* the detected header are emitted; fully blank
+   rows are dropped. Accounts are POSTed to `/api/accounts/upload`.
+
+**Stage 2 — Worker (`src/index.ts` → `/api/accounts/upload`)**
+1. **Header normalization** — every incoming header is normalized (NBSP → space,
+   whitespace collapsed, trimmed, lowercased) and matched against `NORMALIZED_COLUMN_MAP`
+   (built from `COLUMN_MAP` plus name aliases `name` / `account` / `account name` /
+   `company` / `company name` → `account_name`).
+2. **Required-column guard** — if no `account_name` column can be resolved, the request
+   fails fast with a `400` and a human-readable message instead of a raw SQLite error.
+3. **Nameless-row skip** — rows whose resolved `account_name` is null/empty are skipped
+   and counted, rather than aborting the whole batch on the `NOT NULL` constraint.
+4. **Typed inserts** — numeric columns (revenue, spend, traffic %, employees, …) are
+   coerced via `parseNumeric` (strips `$` / `,`); the original row is preserved as JSON
+   in `raw_data`. Inserts run as guarded D1 batches.
+
+**Response**: `{ success, inserted, skipped, total }` — `skipped` tells the UI how many
+rows were dropped for a missing name.
 
 ### Research
 | Method | Path | Description |
@@ -480,7 +514,7 @@ A command palette (`⌘K` / `Ctrl+K`) opens anywhere for fuzzy-searchable fast n
 | `#/email-stats` | **Email performance dashboard** — sent/opened/replied metrics, daily trend, per-campaign funnel, suppression list management |
 | `#/mcp` | **MCP settings** — connected servers, tool discovery, quick-add presets, RevFlare-as-MCP-server endpoint |
 | `#/org` | **Teams** — create orgs, invite members, switch active org, manage shared playbooks |
-| `#/upload` | Excel upload with drag-and-drop |
+| `#/upload` | Excel upload with drag-and-drop — auto-detects the right sheet + header row (see Account Upload Pipeline) |
 | `#/search/:query` | Semantic search results across all intel |
 | `#/analytics` | Usage analytics: page views, tab popularity, daily trends, per-user activity (admin only) |
 | `#/account/:id` | Account detail with 7 tabs (see below) |
@@ -976,17 +1010,22 @@ wrangler d1 execute revflare-db --remote --file=migration-email-tracking.sql
 wrangler d1 execute revflare-db --remote --file=migration-mcp.sql
 wrangler d1 execute revflare-db --remote --file=migration-semantic-search.sql
 wrangler d1 execute revflare-db --remote --file=migration-orgs.sql
+# Note: schema-full.sql already includes user scoping, so migration-auth.sql is NOT
+# run here — it is only for upgrading an older install created from legacy schema.sql.
 
 # Set required secrets
 wrangler secret put ENC_SECRET              # Any random string for encryption
 wrangler secret put CF_ACCESS_TEAM_DOMAIN   # e.g. 'myteam.cloudflareaccess.com'
 wrangler secret put CF_ACCESS_AUD           # From Access app config
 
-# Deploy
+# Deploy (or: npm run deploy)
 wrangler deploy
 ```
 
 Configure Cloudflare Access on `revflare.*.workers.dev` for auth.
+
+A daily cron (`0 6 * * *`, 06:00 UTC) refreshes the threat-intel KV cache, dispatches
+due scheduled email sends, and advances multi-touch sequences.
 
 ### Running Tests
 ```bash
@@ -1001,18 +1040,19 @@ npm test
 ```
 revFlare/
 ├── src/
-│   ├── index.ts                    # Main Worker (~6,100 lines)
+│   ├── index.ts                    # Main Worker (~6,130 lines)
 │   ├── advanced-features.ts        # Lead scoring, ROI, lookalikes, sequences, etc. (~265 lines)
 │   ├── advanced-features.test.ts   # Unit tests (vitest, ~167 lines)
 │   ├── mcp-client.ts               # MCP client + SSRF guard + integration map (~281 lines)
 │   └── threat-intel.ts             # Threat intelligence module (~482 lines)
 ├── public/
 │   ├── index.html                  # HTML shell + nav + Gmail wizard (~160 lines)
-│   ├── app.js                      # Frontend SPA (~4,560 lines)
+│   ├── app.js                      # Frontend SPA (~4,587 lines)
 │   └── styles.css                  # Design system (~1,650 lines)
 ├── screenshots/                    # App screenshots (auto-generated)
 ├── schema-full.sql                 # Complete DB schema (21 base tables + indexes)
 ├── schema.sql                      # Core DB schema (legacy)
+├── migration-auth.sql              # Legacy user-scoping upgrade (folded into schema-full.sql)
 ├── migration-approval.sql          # Email approval workflow migration
 ├── migration-email-daily-limit.sql # Daily send limit tracking table
 ├── migration-improvements.sql      # Contacts, scheduled sends, reply tracking, indexes
@@ -1021,6 +1061,10 @@ revFlare/
 ├── migration-semantic-search.sql   # BGE embedding BLOB column for true semantic search
 ├── migration-orgs.sql              # Organizations, members, user prefs, persona_performance
 ├── build_final_pptx.py             # Presentation builder (mock server + Playwright + PPTX)
+├── build_pptx.py                   # Alternate PPTX builder
+├── mock_server.py                  # Local mock API used for screenshot / PPTX capture
+├── capture_screenshots.py          # Playwright screenshot capture
+├── opencode-skill/                 # Installable OpenCode skill (SKILL.md + install.sh + scripts)
 ├── seed.mjs                        # Excel seed script
 ├── wrangler.toml                   # Worker config
 ├── package.json                    # Dependencies + test scripts

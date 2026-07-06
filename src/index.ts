@@ -444,6 +444,26 @@ const COLUMN_MAP: Record<string, string> = {
   'Customer Acquisition Date': 'customer_acquisition_date',
 };
 
+// Normalize a spreadsheet header: strip non-breaking spaces, collapse whitespace,
+// trim, and lowercase — so 'Account Name ', 'ACCOUNT NAME', etc. all match.
+function normalizeHeader(h: any): string {
+  return String(h ?? '')
+    .replace(/\u00a0/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+// Case/whitespace-insensitive lookup built from COLUMN_MAP, plus common
+// Salesforce aliases for the required account_name column.
+const NORMALIZED_COLUMN_MAP: Record<string, string> = {};
+for (const [header, col] of Object.entries(COLUMN_MAP)) {
+  NORMALIZED_COLUMN_MAP[normalizeHeader(header)] = col;
+}
+for (const alias of ['name', 'account', 'account name', 'company', 'company name']) {
+  if (!(alias in NORMALIZED_COLUMN_MAP)) NORMALIZED_COLUMN_MAP[alias] = 'account_name';
+}
+
 function parseNumeric(val: any): number | null {
   if (val === null || val === undefined || val === '') return null;
   if (typeof val === 'number') return val;
@@ -475,15 +495,27 @@ app.post('/api/accounts/upload', async (c) => {
     const dbCols = Object.values(COLUMN_MAP);
     const headerIndexMap: Record<string, number> = {};
     headers.forEach((h, i) => {
-      if (COLUMN_MAP[h]) headerIndexMap[COLUMN_MAP[h]] = i;
+      const col = NORMALIZED_COLUMN_MAP[normalizeHeader(h)];
+      if (col && !(col in headerIndexMap)) headerIndexMap[col] = i;
     });
 
+    // account_name is NOT NULL — if the file has no recognizable name column,
+    // fail fast with a helpful message instead of a raw SQLite constraint error.
+    if (headerIndexMap['account_name'] === undefined) {
+      return c.json({
+        error: 'Could not find an "Account Name" column in the uploaded file. ' +
+          'Please make sure your Salesforce export includes an "Account Name" (or "Name") column.',
+      }, 400);
+    }
+
     let inserted = 0;
+    let skipped = 0;
     const BATCH = 50;
 
     for (let b = 0; b < rows.length; b += BATCH) {
       const batch = rows.slice(b, b + BATCH);
-      const stmts = batch.map((row) => {
+      const stmts: D1PreparedStatement[] = [];
+      for (const row of batch) {
         const vals: Record<string, any> = {};
         for (const [dbCol, idx] of Object.entries(headerIndexMap)) {
           let v = row[idx];
@@ -497,6 +529,14 @@ app.post('/api/accounts/upload', async (c) => {
           }
           vals[dbCol] = v ?? null;
         }
+
+        // account_name is required — skip rows without one rather than crashing the batch.
+        const name = vals['account_name'];
+        if (name === null || name === undefined || String(name).trim() === '') {
+          skipped++;
+          continue;
+        }
+
         vals['raw_data'] = JSON.stringify(
           Object.fromEntries(headers.map((h, i) => [h, row[i] ?? null]))
         );
@@ -505,13 +545,13 @@ app.post('/api/accounts/upload', async (c) => {
         const placeholders = columns.map(() => '?').join(',');
         const values = columns.map((col) => col === 'user_email' ? c.get('userEmail') : (vals[col] ?? null));
 
-        return c.env.DB.prepare(
+        stmts.push(c.env.DB.prepare(
           `INSERT INTO accounts (${columns.join(',')}) VALUES (${placeholders})`
-        ).bind(...values);
-      });
+        ).bind(...values));
+      }
 
-      await c.env.DB.batch(stmts);
-      inserted += batch.length;
+      if (stmts.length) await c.env.DB.batch(stmts);
+      inserted += stmts.length;
     }
 
     // Dedup safety: remove any duplicates by account_name + user_email (keep lowest ID)
@@ -526,7 +566,7 @@ app.post('/api/accounts/upload', async (c) => {
       'SELECT COUNT(*) as cnt FROM accounts WHERE user_email = ?'
     ).bind(email).first() as any;
 
-    return c.json({ success: true, inserted, total: finalCount?.cnt || inserted });
+    return c.json({ success: true, inserted, skipped, total: finalCount?.cnt || inserted });
   } catch (e: any) {
     return c.json({ error: e.message }, 500);
   }

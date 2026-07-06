@@ -294,15 +294,38 @@ function renderUpload(c){
   dz.ondrop=e=>{e.preventDefault();dz.classList.remove('drag-over');if(e.dataTransfer.files[0])handleFile(e.dataTransfer.files[0]);};
 }
 
+// Header cells that identify the account-name column (case/space-insensitive).
+const NAME_HEADERS=['account name','account','name','company','company name'];
+function normHeader(h){return String(h==null?'':h).replace(/\u00a0/g,' ').replace(/\s+/g,' ').trim().toLowerCase();}
+// Pick the sheet + header row that actually holds account data. Handles workbooks
+// where sheet 0 is a "Read Me"/summary tab and where a title row sits above the headers.
+function pickAccountSheet(wb){
+  let best=null;
+  for(const name of wb.SheetNames){
+    const rows=XLSX.utils.sheet_to_json(wb.Sheets[name],{header:1,blankrows:false});
+    let hdrIdx=-1;
+    for(let i=0;i<Math.min(rows.length,25);i++){
+      if((rows[i]||[]).some(c=>NAME_HEADERS.includes(normHeader(c)))){hdrIdx=i;break;}
+    }
+    if(hdrIdx<0)continue;
+    const headers=rows[hdrIdx];
+    const dataRows=rows.slice(hdrIdx+1).filter(r=>r.some(c=>c!=null&&c!==''));
+    if(!best||dataRows.length>best.dataRows.length)best={headers,dataRows,sheetName:name};
+  }
+  return best;
+}
+
 async function handleFile(file){
   const pw=$('#pw'),pf=$('#pf'),pt=$('#pt');
   pw.style.display='block';pt.textContent='Reading file...';pf.style.width='5%';
   try{
     const data=await file.arrayBuffer();pf.style.width='15%';pt.textContent='Parsing spreadsheet...';
-    const wb=XLSX.read(data,{type:'array'});const rows=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{header:1});
-    if(rows.length<2)throw new Error('File appears empty');
-    const headers=rows[0];const dataRows=rows.slice(1).filter(r=>r.some(c=>c!=null&&c!==''));
-    pf.style.width='20%';pt.textContent=`Parsed ${dataRows.length.toLocaleString()} accounts. Clearing old data...`;
+    const wb=XLSX.read(data,{type:'array'});
+    const picked=pickAccountSheet(wb);
+    if(!picked)throw new Error('Could not find an account list in this file. Make sure a sheet has a header row with an "Account" or "Account Name" column.');
+    const {headers,dataRows,sheetName}=picked;
+    if(!dataRows.length)throw new Error(`No account rows found on sheet "${sheetName}".`);
+    pf.style.width='20%';pt.textContent=`Parsed ${dataRows.length.toLocaleString()} accounts from "${sheetName}". Clearing old data...`;
     await api.post('/accounts/clear',{});
     pf.style.width='25%';pt.textContent=`Uploading ${dataRows.length.toLocaleString()} accounts...`;
     const B=100;const total=Math.ceil(dataRows.length/B);

@@ -21,8 +21,8 @@ export function calculateLeadScore(account: any): { score: number; factors: { na
   const cfMRR = account.current_monthly_fee || 0;
   const penetration = itSpend > 0 ? cfMRR / itSpend : 0;
   if (penetration < 0.05 && itSpend > 5000) { factors.push({ name: 'Low Wallet Penetration', points: 15, detail: (penetration * 100).toFixed(1) + '% — huge expansion opportunity' }); score += 15; }
-  else if (penetration < 0.2) { factors.push({ name: 'Growth Room', points: 10, detail: (penetration * 100).toFixed(1) + '% penetration' }); score += 10; }
-  else if (penetration < 0.5) { factors.push({ name: 'Moderate Penetration', points: 5, detail: (penetration * 100).toFixed(1) + '%' }); score += 5; }
+  else if (itSpend > 0 && penetration < 0.2) { factors.push({ name: 'Growth Room', points: 10, detail: (penetration * 100).toFixed(1) + '% penetration' }); score += 10; }
+  else if (itSpend > 0 && penetration < 0.5) { factors.push({ name: 'Moderate Penetration', points: 5, detail: (penetration * 100).toFixed(1) + '%' }); score += 5; }
 
   // 3. Displaceable Competitors (0-15 pts)
   const allProds = [account.cdn_products, account.security_products, account.dns_products, account.cloud_hosting_products].filter(Boolean).join(';').toLowerCase();

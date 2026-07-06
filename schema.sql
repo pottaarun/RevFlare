@@ -73,6 +73,9 @@ CREATE TABLE IF NOT EXISTS persona_messages (
   message_type TEXT NOT NULL,
   subject TEXT,
   content TEXT NOT NULL,
+  variation_group TEXT,
+  variation_index INTEGER DEFAULT 0,
+  variation_label TEXT,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
 );

@@ -1613,6 +1613,14 @@ tr:last-child td { border-bottom: none; }
   border-color: var(--border-accent) !important;
 }
 
+/* Campaign variation tabs (A/B/C) */
+.variation-tabs { display: flex; gap: 6px; margin: 10px 0 12px; flex-wrap: wrap; }
+.camp-var-tab.selected {
+  background: var(--accent-glow) !important;
+  color: var(--accent-bright) !important;
+  border-color: var(--border-accent) !important;
+}
+
 /* ── Bulk selection (dashboard multi-select) ─────────────────────── */
 tr.bulk-selected td {
   background: rgba(124, 127, 255, 0.08);

@@ -1528,7 +1528,7 @@ const RESEARCH_MODEL = '@cf/deepseek-ai/deepseek-r1-distill-qwen-32b'; // Fixed 
 const EMAIL_MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
 const FAST_MODEL = '@cf/meta/llama-3.1-8b-instruct';
 
-async function runAI(ai: Ai, model: string, system: string, user: string): Promise<string> {
+async function runAI(ai: Ai, model: string, system: string, user: string, maxTokens = 4096): Promise<string> {
   // Trim context if too long (DeepSeek R1 has smaller context than Llama)
   const maxCtx = model.includes('deepseek') ? 12000 : 20000;
   if (user.length > maxCtx) user = user.slice(0, maxCtx) + '\n\n[Context trimmed for length]';
@@ -1539,7 +1539,7 @@ async function runAI(ai: Ai, model: string, system: string, user: string): Promi
         { role: 'system', content: system },
         { role: 'user', content: user },
       ],
-      max_tokens: 4096,
+      max_tokens: maxTokens,
       temperature: 0.7,
     });
     const result = (response as any).response || '';
@@ -1555,7 +1555,7 @@ async function runAI(ai: Ai, model: string, system: string, user: string): Promi
             { role: 'system', content: system },
             { role: 'user', content: user.slice(0, 20000) },
           ],
-          max_tokens: 4096,
+          max_tokens: maxTokens,
           temperature: 0.7,
         });
         return (fallback as any).response || '';
@@ -1563,6 +1563,50 @@ async function runAI(ai: Ai, model: string, system: string, user: string): Promi
     }
     throw e;
   }
+}
+
+// ── Message Variations (A/B/C drafts) ──────────────────────────────
+// Each email generation produces 3 sibling drafts sharing a variation_group;
+// the user approves exactly one and the others stay as pending alternates.
+const VARIATION_SPECS: { label: string; angle: string }[] = [
+  { label: 'Direct / ROI', angle: 'Lead with the single most compelling metric or business outcome. Punchy and numbers-forward, short sentences, one clear ask.' },
+  { label: 'Consultative', angle: 'Open with an insight about their business or a relevant observation. Warmer, advisory tone that builds credibility before the ask.' },
+  { label: 'Executive Brief', angle: 'Concise and skimmable for a C-level reader. Tight strategic framing, minimal detail, one high-level ask.' },
+];
+
+interface ParsedVariation { index: number; label: string; subject: string; content: string; }
+
+// Instruction appended to an email-generation prompt to request 3 distinct
+// variations in a delimited format that parseVariations() can split apart.
+function buildVariationInstruction(): string {
+  const angles = VARIATION_SPECS.map((v, i) => `Variation ${i + 1} (${v.label}): ${v.angle}`).join('\n');
+  const format = VARIATION_SPECS.map((v, i) =>
+    `===VARIATION ${i + 1}: ${v.label}===\nSubject: <subject line for variation ${i + 1}>\n<email body for variation ${i + 1}, 120-200 words>`,
+  ).join('\n\n');
+  return `\n\nProduce THREE distinct variations of this email, each taking a different angle:\n${angles}\n\nReturn them using EXACTLY this format, including the === delimiters. Write nothing before the first delimiter or after the last body:\n\n${format}\n\nEach variation must be self-contained with its own Subject line and body. Do not add commentary, numbering, or extra notes outside this format.`;
+}
+
+// Parse delimited multi-variation AI output into structured drafts. Robust
+// fallback: if no delimiters are found, return a single variation from raw text.
+function parseVariations(raw: string, fallbackSubject: string): ParsedVariation[] {
+  const text = (raw || '').trim();
+  const parts = text.split(/===\s*VARIATION\s*\d+\s*:?\s*([^=\n]*?)\s*===/i);
+  const out: ParsedVariation[] = [];
+  // parts = [preamble, label1, body1, label2, body2, ...]
+  for (let i = 1; i < parts.length && out.length < 3; i += 2) {
+    const parsedLabel = (parts[i] || '').trim();
+    const body = (parts[i + 1] || '').trim();
+    if (!body) continue;
+    const idx = out.length;
+    const subjMatch = body.match(/Subject:?\s*(.+?)(?:\n|$)/i);
+    const subject = (subjMatch ? subjMatch[1] : '').trim() || fallbackSubject;
+    out.push({ index: idx, label: VARIATION_SPECS[idx]?.label || parsedLabel || `Variation ${idx + 1}`, subject, content: body });
+  }
+  if (out.length === 0) {
+    const subjMatch = text.match(/Subject:?\s*(.+?)(?:\n|$)/i);
+    out.push({ index: 0, label: VARIATION_SPECS[0].label, subject: (subjMatch ? subjMatch[1] : '').trim() || fallbackSubject, content: text });
+  }
+  return out;
 }
 
 function buildAccountContext(account: any): string {
@@ -2200,15 +2244,21 @@ If this is an email, start with: Subject: [compelling subject line]
 Make it feel like a real human wrote this after spending 2 hours researching the account. The tone should match exactly what a top-performing ${personaConfig.name} would write.`;
 
 
-  const content = await runAI(c.env.AI, EMAIL_MODEL, system, prompt);
+  const raw = await runAI(c.env.AI, EMAIL_MODEL, system, prompt + buildVariationInstruction(), 6144);
 
-  const subject = content.match(/Subject:?\s*(.+?)(?:\n|$)/i)?.[1]?.trim() || `${msgTypeLabel} - ${account.account_name}`;
+  const fallbackSubject = `${msgTypeLabel} - ${account.account_name}`;
+  const parsed = parseVariations(raw, fallbackSubject);
+  const variationGroup = crypto.randomUUID();
+  const inserted: any[] = [];
+  for (const v of parsed) {
+    const r = await c.env.DB.prepare(
+      'INSERT INTO persona_messages (account_id, persona, message_type, subject, content, user_email, variation_group, variation_index, variation_label) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    ).bind(accountId, persona, messageType, v.subject, v.content, c.get('userEmail'), variationGroup, v.index, v.label).run();
+    inserted.push({ id: r.meta.last_row_id, variation_index: v.index, variation_label: v.label, subject: v.subject, content: v.content, approval_status: 'pending_approval' });
+  }
+  const first = inserted[0];
 
-  const insertResult = await c.env.DB.prepare(
-    'INSERT INTO persona_messages (account_id, persona, message_type, subject, content, user_email) VALUES (?, ?, ?, ?, ?, ?)'
-  ).bind(accountId, persona, messageType, subject, content, c.get('userEmail')).run();
-
-  return c.json({ id: insertResult.meta.last_row_id, persona, messageType, subject, content, approval_status: 'pending_approval' });
+  return c.json({ id: first.id, persona, messageType, subject: first.subject, content: first.content, approval_status: 'pending_approval', variation_group: variationGroup, variations: inserted });
 });
 
 app.get('/api/messaging/:accountId', async (c) => {
@@ -2226,11 +2276,20 @@ app.get('/api/messaging/:accountId', async (c) => {
 app.post('/api/messages/:id/approve', async (c) => {
   const id = c.req.param('id');
   const email = c.get('userEmail');
-  const result = await c.env.DB.prepare(
+  const msg = await c.env.DB.prepare(
+    'SELECT variation_group FROM persona_messages WHERE id = ? AND user_email = ?'
+  ).bind(id, email).first() as any;
+  if (!msg) return c.json({ error: 'Message not found' }, 404);
+  // Only one variation per group can be approved — demote any previously-approved sibling.
+  if (msg.variation_group) {
+    await c.env.DB.prepare(
+      "UPDATE persona_messages SET approval_status = 'pending_approval' WHERE variation_group = ? AND user_email = ? AND approval_status = 'approved'"
+    ).bind(msg.variation_group, email).run();
+  }
+  await c.env.DB.prepare(
     'UPDATE persona_messages SET approval_status = ? WHERE id = ? AND user_email = ?'
   ).bind('approved', id, email).run();
-  if (!result.meta.changes) return c.json({ error: 'Message not found' }, 404);
-  return c.json({ success: true, approval_status: 'approved' });
+  return c.json({ success: true, approval_status: 'approved', variation_group: msg.variation_group || null });
 });
 
 app.post('/api/messages/:id/reject', async (c) => {
@@ -2248,11 +2307,17 @@ app.post('/api/campaign-emails/:id/approve', async (c) => {
   const id = c.req.param('id');
   const email = c.get('userEmail');
   const em = await c.env.DB.prepare(
-    'SELECT ce.id FROM campaign_emails ce JOIN campaigns c ON ce.campaign_id = c.id WHERE ce.id = ? AND c.user_email = ?'
-  ).bind(id, email).first();
+    'SELECT ce.id, ce.variation_group FROM campaign_emails ce JOIN campaigns c ON ce.campaign_id = c.id WHERE ce.id = ? AND c.user_email = ?'
+  ).bind(id, email).first() as any;
   if (!em) return c.json({ error: 'Email not found' }, 404);
+  // Only one variation per group can be approved — demote any previously-approved sibling.
+  if (em.variation_group) {
+    await c.env.DB.prepare(
+      "UPDATE campaign_emails SET approval_status = 'pending_approval' WHERE variation_group = ? AND approval_status = 'approved'"
+    ).bind(em.variation_group).run();
+  }
   await c.env.DB.prepare('UPDATE campaign_emails SET approval_status = ? WHERE id = ?').bind('approved', id).run();
-  return c.json({ success: true, approval_status: 'approved' });
+  return c.json({ success: true, approval_status: 'approved', variation_group: em.variation_group || null });
 });
 
 app.post('/api/campaign-emails/:id/reject', async (c) => {
@@ -2272,10 +2337,25 @@ app.post('/api/campaigns/:id/approve-all', async (c) => {
   const email = c.get('userEmail');
   const campaign = await c.env.DB.prepare('SELECT id FROM campaigns WHERE id = ? AND user_email = ?').bind(campaignId, email).first();
   if (!campaign) return c.json({ error: 'Campaign not found' }, 404);
-  const result = await c.env.DB.prepare(
-    "UPDATE campaign_emails SET approval_status = 'approved' WHERE campaign_id = ? AND approval_status = 'pending_approval'"
+  // Standalone (ungrouped) emails: approve every pending one.
+  const nullRes = await c.env.DB.prepare(
+    "UPDATE campaign_emails SET approval_status = 'approved' WHERE campaign_id = ? AND approval_status = 'pending_approval' AND variation_group IS NULL"
   ).bind(campaignId).run();
-  return c.json({ success: true, updated: result.meta.changes });
+  // Grouped emails: approve exactly one per group (lowest row), skipping groups that already have an approved variation.
+  const pickRes = await c.env.DB.prepare(
+    `UPDATE campaign_emails SET approval_status = 'approved'
+     WHERE campaign_id = ? AND approval_status = 'pending_approval' AND variation_group IS NOT NULL
+       AND id IN (
+         SELECT MIN(id) FROM campaign_emails ce2
+         WHERE ce2.campaign_id = ? AND ce2.variation_group IS NOT NULL
+           AND ce2.variation_group NOT IN (
+             SELECT variation_group FROM campaign_emails
+             WHERE campaign_id = ? AND variation_group IS NOT NULL AND approval_status = 'approved'
+           )
+         GROUP BY ce2.variation_group
+       )`
+  ).bind(campaignId, campaignId, campaignId).run();
+  return c.json({ success: true, updated: (nullRes.meta.changes || 0) + (pickRes.meta.changes || 0) });
 });
 
 // Bulk reject all pending campaign emails
@@ -3615,7 +3695,7 @@ app.post('/api/gmail/send', async (c) => {
 app.post('/api/gmail/send-campaign/:campaignId', async (c) => {
   const campaignId = c.req.param('campaignId');
   const email = c.get('userEmail');
-  const { emailIds, toField } = await c.req.json<{ emailIds: number[]; toField: string }>();
+  const { emailIds, toField, recipients } = await c.req.json<{ emailIds: number[]; toField?: string; recipients?: Record<string, string> }>();
 
   // ── Daily email limit check ──────────────────────────────────────
   const dailySent = await getDailyEmailCount(c.env.DB, email);
@@ -3658,8 +3738,8 @@ app.post('/api/gmail/send-campaign/:campaignId', async (c) => {
     if (!em) { results.push({ id: eid, status: 'not_found' }); continue; }
     if (em.approval_status !== 'approved') { results.push({ id: eid, status: 'not_approved', error: 'Email not approved — only approved emails can be sent' }); continue; }
 
-    // Determine recipient: use account's primary contact if no toField, else toField
-    let recipient = toField;
+    // Determine recipient: per-email override map wins, then batch-wide toField, then account primary contact.
+    let recipient = (recipients && recipients[String(eid)]) || toField;
     if (!recipient && em.account_id) {
       const contact = await c.env.DB.prepare('SELECT email FROM contacts WHERE account_id = ? AND user_email = ? AND is_primary = 1 LIMIT 1').bind(em.account_id, email).first() as any;
       if (contact?.email) recipient = contact.email;
@@ -4048,14 +4128,16 @@ CLOUDFLARE PLATFORM EDGE:
 ${campaign.custom_context ? '\nCAMPAIGN CONTEXT: ' + campaign.custom_context : ''}`;
 
     try {
-      const content = await runAI(c.env.AI, EMAIL_MODEL, system, prompt);
-      const subject = content.match(/Subject:?\s*(.+?)(?:\n|$)/i)?.[1]?.trim() || `${themeConfig.name} - ${a.account_name}`;
-
-      await c.env.DB.prepare(
-        'INSERT INTO campaign_emails (campaign_id, account_id, account_name, subject, content, status) VALUES (?, ?, ?, ?, ?, ?)'
-      ).bind(campaignId, a.id, a.account_name, subject, content, 'generated').run();
-
-      results.push({ accountId: a.id, accountName: a.account_name, subject, status: 'generated' });
+      const raw = await runAI(c.env.AI, EMAIL_MODEL, system, prompt + buildVariationInstruction(), 6144);
+      const fallbackSubject = `${themeConfig.name} - ${a.account_name}`;
+      const parsed = parseVariations(raw, fallbackSubject);
+      const variationGroup = crypto.randomUUID();
+      for (const v of parsed) {
+        await c.env.DB.prepare(
+          'INSERT INTO campaign_emails (campaign_id, account_id, account_name, subject, content, status, variation_group, variation_index, variation_label) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+        ).bind(campaignId, a.id, a.account_name, v.subject, v.content, 'generated', variationGroup, v.index, v.label).run();
+      }
+      results.push({ accountId: a.id, accountName: a.account_name, subject: parsed[0].subject, status: 'generated' });
     } catch (e: any) {
       results.push({ accountId: a.id, accountName: a.account_name, status: 'error', error: e.message });
     }
@@ -4118,11 +4200,28 @@ app.get('/api/campaigns/:id/export', async (c) => {
   const campaign = await c.env.DB.prepare('SELECT * FROM campaigns WHERE id = ? AND user_email = ?').bind(campaignId, email).first();
   if (!campaign) return c.json({ error: 'Campaign not found' }, 404);
   const emails = await c.env.DB.prepare(
-    'SELECT account_name, subject, content FROM campaign_emails WHERE campaign_id = ? AND status = ? ORDER BY created_at ASC'
+    'SELECT id, account_name, subject, content, variation_group, variation_index, approval_status FROM campaign_emails WHERE campaign_id = ? AND status = ? ORDER BY created_at ASC'
   ).bind(campaignId, 'generated').all();
 
-  let csv = 'Account Name,Subject,Email Body\n';
+  // Collapse each variation group to a single row (prefer approved, else lowest variation_index);
+  // standalone rows (no variation_group) pass through. Preserve first-seen (created_at) order.
+  const order: string[] = [];
+  const picked = new Map<string, any>();
   for (const e of emails.results as any[]) {
+    const key = e.variation_group || `__solo_${e.id}`;
+    const cur = picked.get(key);
+    if (!cur) { picked.set(key, e); order.push(key); continue; }
+    const eApproved = e.approval_status === 'approved';
+    const curApproved = cur.approval_status === 'approved';
+    if ((eApproved && !curApproved) ||
+        (eApproved === curApproved && (e.variation_index ?? 0) < (cur.variation_index ?? 0))) {
+      picked.set(key, e);
+    }
+  }
+
+  let csv = 'Account Name,Subject,Email Body\n';
+  for (const k of order) {
+    const e = picked.get(k);
     const body = (e.content || '').replace(/^Subject:.*\n*/im, '').replace(/"/g, '""').replace(/\n/g, ' ');
     csv += `"${e.account_name}","${e.subject}","${body}"\n`;
   }
@@ -4272,16 +4371,19 @@ CLOUDFLARE PLATFORM EDGE:
 ${campaign.custom_context ? '\nCAMPAIGN CONTEXT: ' + campaign.custom_context : ''}`;
 
   try {
-    const content = await runAI(c.env.AI, EMAIL_MODEL, system, prompt);
-    const subject = content.match(/Subject:?\s*(.+?)(?:\n|$)/i)?.[1]?.trim() || `${themeConfig.name} - ${a.account_name}`;
+    const raw = await runAI(c.env.AI, EMAIL_MODEL, system, prompt + buildVariationInstruction(), 6144);
+    const fallbackSubject = `${themeConfig.name} - ${a.account_name}`;
+    const parsed = parseVariations(raw, fallbackSubject);
+    const variationGroup = crypto.randomUUID();
+    for (const v of parsed) {
+      await c.env.DB.prepare(
+        'INSERT INTO campaign_emails (campaign_id, account_id, account_name, subject, content, status, variation_group, variation_index, variation_label) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+      ).bind(campaignId, a.id, a.account_name, v.subject, v.content, 'generated', variationGroup, v.index, v.label).run();
+    }
 
-    await c.env.DB.prepare(
-      'INSERT INTO campaign_emails (campaign_id, account_id, account_name, subject, content, status) VALUES (?, ?, ?, ?, ?, ?)'
-    ).bind(campaignId, a.id, a.account_name, subject, content, 'generated').run();
-
-    // Recount generated emails
+    // Recount generated emails (distinct accounts — each account now has multiple variation rows)
     const genCount = await c.env.DB.prepare(
-      'SELECT COUNT(*) as cnt FROM campaign_emails WHERE campaign_id = ?'
+      'SELECT COUNT(DISTINCT account_id) as cnt FROM campaign_emails WHERE campaign_id = ?'
     ).bind(campaignId).first() as any;
     const newGenCount = genCount?.cnt || 0;
     const filterData = JSON.parse(campaign.filters || '{}');
@@ -4291,7 +4393,7 @@ ${campaign.custom_context ? '\nCAMPAIGN CONTEXT: ' + campaign.custom_context : '
     await c.env.DB.prepare('UPDATE campaigns SET generated = ?, status = ? WHERE id = ?')
       .bind(newGenCount, isComplete ? 'complete' : 'generating', campaignId).run();
 
-    return c.json({ status: 'generated', accountId: a.id, accountName: a.account_name, subject, generated: newGenCount, total: totalIds });
+    return c.json({ status: 'generated', accountId: a.id, accountName: a.account_name, subject: parsed[0].subject, generated: newGenCount, total: totalIds });
   } catch (e: any) {
     // Reset status back from 'generating' if it was the only one
     const filterData = JSON.parse(campaign.filters || '{}');

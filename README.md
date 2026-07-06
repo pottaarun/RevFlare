@@ -50,6 +50,8 @@
 - **Track lead scores**, alerts, team activity, playbooks, and semantic search across all generated intel
 - **Monitor usage analytics** with page/tab visit tracking, daily trends, per-user activity, and tab popularity rankings
 - **Review and approve emails before sending** with a full approval workflow — each generated email shows recipient details (account name, website, industry, location, IT spend) and must be explicitly approved before it can be sent via Gmail
+- **Draft 3 distinct variations per email in a single AI call** — every persona message and per-customer campaign email is generated as three labeled drafts (Direct / ROI, Consultative, Executive Brief) at the same latency and token cost as one; you approve exactly one to send and the alternates are retained. Approving a variation automatically demotes its siblings back to pending
+- **Choose the recipient at send time** via a GUI picker — a dropdown of the account's saved contacts (primary pre-selected) plus a free-form custom-address field, available for both single persona sends and per-customer campaign sends; when omitted, send falls back to the account's primary contact
 - **Refine emails conversationally** via AI chat — paste an instruction like "make it shorter, lead with ROI, end with a Tuesday meeting ask" and a 70B model rewrites the email in place, preserving a full turn-by-turn history
 - **Send emails directly via Gmail** through OAuth integration, with a **100 email/day limit per user** to protect domain reputation, and automatic appending of the user's Gmail signature to every outbound message
 - **Track email opens** via transparent 1x1 tracking pixels routed through a public, auth-bypassing endpoint, with open counts aggregated per message and campaign
@@ -63,7 +65,7 @@
 - **Review email outreach performance** with a dedicated dashboard showing sent / opened / replied rates, daily send trends, per-campaign funnel, and suppression-list management
 - **Share account intelligence** via tokenized public links that bypass Cloudflare Access
 
-The entire application is a **single Cloudflare Worker** (~5,600 lines of TypeScript) with a **vanilla JavaScript SPA** frontend (~4,100 lines). No React, no build step for the frontend, no external backend.
+The entire application is a **single Cloudflare Worker** (~6,200 lines of TypeScript) with a **vanilla JavaScript SPA** frontend (~4,900 lines). No React, no build step for the frontend, no external backend.
 
 **Live URL**: https://revflare.arunpotta1024.workers.dev
 **GitHub**: https://github.com/pottaarun/RevFlare
@@ -185,9 +187,9 @@ Worker secrets always take priority over D1 settings.
 |-------|---------|-------------|
 | `accounts` | Salesforce data (40+ columns) | account_name, website, industry, IT spend breakdown by category, competitor products, user_email |
 | `research_reports` | AI research output | account_id, report_type, content, user_email |
-| `persona_messages` | Generated emails | account_id, persona, message_type, subject, content, approval_status, tracking_id, open_count, gmail_thread_id, replied, user_email |
+| `persona_messages` | Generated emails | account_id, persona, message_type, subject, content, approval_status, variation_group, variation_index, variation_label, tracking_id, open_count, gmail_thread_id, replied, user_email |
 | `campaigns` | Mass email campaigns | name, theme, persona, accountIds (JSON), status, generated count |
-| `campaign_emails` | Individual campaign emails | campaign_id, account_id, subject, content, status, approval_status, tracking_id, open_count, gmail_thread_id, replied |
+| `campaign_emails` | Individual campaign emails | campaign_id, account_id, subject, content, status, approval_status, variation_group, variation_index, variation_label, tracking_id, open_count, gmail_thread_id, replied |
 | `email_chat_history` | **AI chat turns per email** | message_id, message_type, role (user/assistant), content, user_email |
 | `email_opens` | **Open tracking events** | tracking_id, source_type, source_id, user_email, opened_at |
 | `email_suppression` | **Bounces / complaints / unsubscribes** | email_address, reason, detail, user_email |
@@ -313,9 +315,9 @@ rows were dropped for a missing name.
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/api/personas` | All 5 persona configs |
-| `POST` | `/api/messaging/:id` | Generate persona email |
+| `POST` | `/api/messaging/:id` | Generate persona email (returns 3 labeled variations sharing a `variation_group`) |
 | `GET` | `/api/messaging/:id` | List messages |
-| `POST` | `/api/messages/:id/approve` | Approve email for sending |
+| `POST` | `/api/messages/:id/approve` | Approve email for sending (demotes sibling variations in the group back to pending) |
 | `POST` | `/api/messages/:id/reject` | Reject email |
 
 ### AI Chat Email Refinement
@@ -350,9 +352,9 @@ rows were dropped for a missing name.
 |--------|------|-------------|
 | `GET` | `/api/campaign-themes` | 8 campaign themes |
 | `POST` | `/api/campaigns` | Create with account selection |
-| `POST` | `/api/campaigns/:id/generate` | Generate batch (2 emails) |
-| `GET` | `/api/campaigns/:id/export` | Download CSV |
-| `POST` | `/api/campaign-emails/:id/approve` | Approve campaign email |
+| `POST` | `/api/campaigns/:id/generate` | Generate batch (2 accounts/tick × 3 variations each) |
+| `GET` | `/api/campaigns/:id/export` | Download CSV (collapses each variation group to its approved/first draft) |
+| `POST` | `/api/campaign-emails/:id/approve` | Approve campaign email (demotes sibling variations in the group) |
 | `POST` | `/api/campaign-emails/:id/reject` | Reject campaign email |
 | `POST` | `/api/campaigns/:id/approve-all` | Bulk approve all pending |
 | `POST` | `/api/campaigns/:id/reject-all` | Bulk reject all pending |
@@ -422,7 +424,7 @@ rows were dropped for a missing name.
 | `GET` | `/api/gmail/connect` | Start OAuth flow |
 | `GET` | `/api/gmail/daily-limit` | Check daily send limit status |
 | `POST` | `/api/gmail/send` | Send email (requires approval, enforces 100/day limit) |
-| `POST` | `/api/gmail/send-campaign/:id` | Bulk send approved emails (capped by daily limit) |
+| `POST` | `/api/gmail/send-campaign/:id` | Bulk send approved emails (capped by daily limit); optional `recipients` map (`{emailId: address}`) overrides the per-account recipient, else falls back to primary contact |
 | `POST` | `/api/gmail/check-replies` | Poll Gmail threads for replies |
 
 ### Salesforce
@@ -528,7 +530,7 @@ A command palette (`⌘K` / `Ctrl+K`) opens anywhere for fuzzy-searchable fast n
 | **Deep Research** | 4 research types with live 8-probe data |
 | **Threat Intel** | Account-matched incidents with email generation |
 | **Competitive Intel** | Full product catalog with live battlecard generation |
-| **Email Composer** | 5 personas × 5 message types with probe pre-fetch (6h KV cache), recipient info display, approval workflow, an **AI chat refinement panel** for conversational rewrites, and a **reply-rate-aware recommender banner** that surfaces the top 3 persona/message-type combos for this account |
+| **Email Composer** | 5 personas × 5 message types with probe pre-fetch (6h KV cache), recipient info display, approval workflow, **3 labeled draft variations per message** shown as A/B/C tabs (approve one to send), a **recipient picker** (saved-contacts dropdown + custom address), an **AI chat refinement panel** for conversational rewrites, and a **reply-rate-aware recommender banner** that surfaces the top 3 persona/message-type combos for this account |
 | **Advanced** | ROI Calculator, Lookalike Accounts, Meeting Prep, Multi-Touch Sequences, Change Detection, A/B Email Testing, Voice Notes |
 | **History** | All generated research and messages |
 

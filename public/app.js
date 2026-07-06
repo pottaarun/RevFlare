@@ -39,6 +39,42 @@ const api = {
   async post(p, b) { const r = await fetch(`/api${p}`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(b) }); if (!r.ok) throw new Error((await r.json().catch(()=>({}))).error||r.statusText); return r.json(); },
 };
 
+// ── Recipient picker ───────────────────────────────────────────────
+// Renders a <select> of an account's saved contacts + a "Custom address…"
+// option that reveals a free-text email input. Shared by persona send and
+// per-customer campaign send. `contacts` is the array from GET /api/contacts/:id.
+function recipientPickerHTML(contacts, opts) {
+  opts = opts || {};
+  var selId = opts.selectId || 'recipient-select';
+  var inpId = opts.inputId || 'recipient-custom';
+  var list = Array.isArray(contacts) ? contacts.filter(function(ct){ return ct && ct.email; }) : [];
+  var hasContacts = list.length > 0;
+  var h = '<div class="recipient-picker" style="margin:10px 0">';
+  h += '<label style="display:block;font-size:11px;color:var(--text-muted);font-weight:600;margin-bottom:4px">Send to</label>';
+  h += '<select id="' + selId + '" class="recipient-select" onchange="onRecipientChange(this,\'' + inpId + '\')" style="width:100%;padding:8px 10px;border-radius:var(--radius);border:1px solid var(--border);background:var(--glass);color:var(--text-primary);font-size:13px">';
+  for (var i = 0; i < list.length; i++) {
+    var ct = list[i];
+    var nm = ((ct.first_name || '') + ' ' + (ct.last_name || '')).trim();
+    var lbl = (nm ? nm + ' — ' : '') + ct.email + (ct.title ? ' (' + ct.title + ')' : '');
+    h += '<option value="' + esc(ct.email) + '"' + (ct.is_primary ? ' selected' : '') + '>' + esc(lbl) + '</option>';
+  }
+  h += '<option value="__custom__"' + (hasContacts ? '' : ' selected') + '>Custom address…</option>';
+  h += '</select>';
+  h += '<input id="' + inpId + '" type="email" placeholder="name@company.com" style="display:' + (hasContacts ? 'none' : 'block') + ';width:100%;margin-top:6px;padding:8px 10px;border-radius:var(--radius);border:1px solid var(--border);background:var(--glass);color:var(--text-primary);font-size:13px" />';
+  h += '</div>';
+  return h;
+}
+function onRecipientChange(sel, inputId) {
+  var inp = document.getElementById(inputId);
+  if (inp) inp.style.display = sel.value === '__custom__' ? 'block' : 'none';
+}
+function getRecipient(selectId, inputId) {
+  var sel = document.getElementById(selectId || 'recipient-select');
+  if (!sel) return '';
+  if (sel.value === '__custom__') { var inp = document.getElementById(inputId || 'recipient-custom'); return inp ? inp.value.trim() : ''; }
+  return sel.value;
+}
+
 // ── State ──────────────────────────────────────────────────────────
 const S = { filters:{}, sort:'total_it_spend', order:'DESC', page:1, personas:null, activeTab:'overview', selPersona:null, selMsg:null };
 
@@ -1316,20 +1352,45 @@ async function generateEmail(a, cache) {
   var reqBody = { persona: S.selPersona, messageType: S.selMsg, customContext: ctx };
   if (cache && cache.probeData) reqBody.prefetchedProbeData = cache.probeData;
 
-  // Call API
+  // Call API — fetch this account's saved contacts in parallel so the recipient
+  // picker is ready with zero added latency (only when Gmail send is available).
+  var contactsP = window._gmailConnected ? api.get('/contacts/' + a.id).catch(function(){ return []; }) : Promise.resolve([]);
   var r = await api.post('/messaging/' + a.id, reqBody);
-
-  // Parse result
-  var content = r.content || '';
-  var subjectMatch = content.match(/Subject:?\s*(.+?)(?:\n|$)/i);
-  var subject = subjectMatch ? subjectMatch[1].trim() : (msgLabel + ' - ' + a.account_name);
-  var emailBody = content.replace(/^Subject:?\s*.+\n*/im, '');
 
   if (cache) cache.lastResult = r;
 
-  // Store message ID and approval status for approval workflow
-  var messageId = r.id;
-  var approvalStatus = r.approval_status || 'pending_approval';
+  // Build the variation list. Backend returns r.variations (A/B/C drafts sharing
+  // a variation_group); fall back to a single synthesized draft for older or
+  // standalone responses so the rest of the UI stays uniform.
+  function stripSubject(txt) { return (txt || '').replace(/^Subject:?\s*.+\n*/im, ''); }
+  function subjOf(txt, fb) { var m = (txt || '').match(/Subject:?\s*(.+?)(?:\n|$)/i); return m ? m[1].trim() : fb; }
+  var fallbackSubj = msgLabel + ' - ' + a.account_name;
+  var variations = (r.variations && r.variations.length) ? r.variations.map(function(v, i) {
+    return {
+      id: v.id,
+      label: v.variation_label || ('Variation ' + (i + 1)),
+      subject: v.subject || subjOf(v.content, fallbackSubj),
+      body: stripSubject(v.content),
+      status: v.approval_status || 'pending_approval',
+    };
+  }) : [{
+    id: r.id,
+    label: 'Variation 1',
+    subject: r.subject || subjOf(r.content, fallbackSubj),
+    body: stripSubject(r.content),
+    status: r.approval_status || 'pending_approval',
+  }];
+
+  // Default selection: prefer an already-approved variation, else the first.
+  var selIdx = 0;
+  for (var vsel = 0; vsel < variations.length; vsel++) { if (variations[vsel].status === 'approved') { selIdx = vsel; break; } }
+
+  // Mutable "current selection" vars — the closures below read and reassign
+  // these, so switching variations transparently updates approve/send/copy.
+  var messageId = variations[selIdx].id;
+  var subject = variations[selIdx].subject;
+  var emailBody = variations[selIdx].body;
+  var approvalStatus = variations[selIdx].status;
 
   // Build email HTML using string concatenation (no template literals)
   var h = '<div class="email-preview slide-up">';
@@ -1361,6 +1422,21 @@ async function generateEmail(a, cache) {
   h += '</div>';
   h += '</div></div>';
 
+  // Variation selector (A/B/C) — only shown when multiple drafts were generated.
+  // "Approved" variation carries a check; clicking a tab swaps the draft in place.
+  if (variations.length > 1) {
+    h += '<div class="variation-selector" id="variation-selector" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">';
+    for (var vtab = 0; vtab < variations.length; vtab++) {
+      var vActive = vtab === selIdx;
+      var vApproved = variations[vtab].status === 'approved';
+      h += '<button class="variation-tab" data-vidx="' + vtab + '" style="flex:1;min-width:130px;padding:10px 12px;border-radius:var(--radius);border:1px solid ' + (vActive ? 'var(--border-accent)' : 'var(--border)') + ';background:' + (vActive ? 'var(--accent-glow)' : 'var(--glass)') + ';color:' + (vActive ? 'var(--text-primary)' : 'var(--text-secondary)') + ';cursor:pointer;text-align:left;transition:all .15s">';
+      h += '<div class="variation-tab-title" style="font-size:11px;font-weight:700;display:flex;align-items:center;gap:6px">Option ' + String.fromCharCode(65 + vtab) + (vApproved ? ' <span style="color:var(--green)">\u2713</span>' : '') + '</div>';
+      h += '<div style="font-size:10px;color:var(--text-muted);margin-top:2px">' + esc(variations[vtab].label) + '</div>';
+      h += '</button>';
+    }
+    h += '</div>';
+  }
+
   // Approval status bar
   h += '<div class="approval-status-bar" id="approval-bar" data-status="' + approvalStatus + '">';
   h += '<div class="approval-status-left">';
@@ -1390,6 +1466,8 @@ async function generateEmail(a, cache) {
   h += '<div class="email-subject-label">Subject</div>';
   h += '<div class="email-subject">' + subject + '</div></div>';
   h += '<div class="email-body">' + md(emailBody) + '</div>';
+    var contacts = await contactsP;
+    if (window._gmailConnected) h += recipientPickerHTML(contacts, { selectId: 'recipient-select', inputId: 'recipient-custom' });
     h += '<div class="email-actions">';
     h += '<button class="btn btn-primary btn-sm" onclick="copyEl(this,\'email\')">' + IC.copy + ' Copy Email</button>';
     h += '<button class="btn btn-ghost btn-sm" onclick="copyEl(this,\'subject\')" data-subject="' + subject.replace(/"/g, '&quot;') + '">' + IC.mail + ' Copy Subject</button>';
@@ -1433,6 +1511,7 @@ async function generateEmail(a, cache) {
       } else if (newStatus === 'rejected') {
         ah = '<button class="btn btn-sm approval-approve-btn" id="approve-btn">Approve</button>';
       }
+      ah += '<button class="btn btn-sm" style="background:var(--glass);color:var(--text-secondary);margin-left:8px" onclick="openEmailChat(' + messageId + ',\'persona_message\')">' + IC.send + ' Refine with AI</button>';
       actions.innerHTML = ah;
       bindApprovalButtons();
     }
@@ -1464,8 +1543,14 @@ async function generateEmail(a, cache) {
           .then(function(r) { return r.json(); })
           .then(function(d) {
             if (d.success) {
+              // Mirror backend: this variation approved, sibling approvals demoted.
+              if (variations[selIdx]) variations[selIdx].status = 'approved';
+              for (var dv = 0; dv < variations.length; dv++) {
+                if (dv !== selIdx && variations[dv].status === 'approved') variations[dv].status = 'pending_approval';
+              }
               updateApprovalUI('approved');
-              toast('Email approved and ready to send', 'success');
+              refreshVariationTabs();
+              toast(variations.length > 1 ? 'Option ' + String.fromCharCode(65 + selIdx) + ' approved and ready to send' : 'Email approved and ready to send', 'success');
             } else {
               toast('Failed to approve: ' + (d.error || 'Unknown error'), 'error');
               approveBtn.disabled = false;
@@ -1482,8 +1567,10 @@ async function generateEmail(a, cache) {
           .then(function(r) { return r.json(); })
           .then(function(d) {
             if (d.success) {
+              if (variations[selIdx]) variations[selIdx].status = 'rejected';
               updateApprovalUI('rejected');
-              toast('Email rejected', 'success');
+              refreshVariationTabs();
+              toast(variations.length > 1 ? 'Option ' + String.fromCharCode(65 + selIdx) + ' rejected' : 'Email rejected', 'success');
             } else {
               toast('Failed to reject: ' + (d.error || 'Unknown error'), 'error');
               rejectBtn.disabled = false;
@@ -1494,6 +1581,54 @@ async function generateEmail(a, cache) {
     }
   }
   bindApprovalButtons();
+
+  // Re-style the A/B/C tabs to reflect the current selection + approval checks.
+  // Only touches inline styles/labels (not innerHTML) so click listeners survive.
+  function refreshVariationTabs() {
+    var sel = document.getElementById('variation-selector');
+    if (!sel) return;
+    var tabs = sel.querySelectorAll('.variation-tab');
+    for (var i = 0; i < tabs.length; i++) {
+      var t = tabs[i];
+      var vi = parseInt(t.getAttribute('data-vidx'), 10);
+      var active = vi === selIdx;
+      var approved = variations[vi] && variations[vi].status === 'approved';
+      t.style.border = '1px solid ' + (active ? 'var(--border-accent)' : 'var(--border)');
+      t.style.background = active ? 'var(--accent-glow)' : 'var(--glass)';
+      t.style.color = active ? 'var(--text-primary)' : 'var(--text-secondary)';
+      var titleEl = t.querySelector('.variation-tab-title');
+      if (titleEl) titleEl.innerHTML = 'Option ' + String.fromCharCode(65 + vi) + (approved ? ' <span style="color:var(--green)">\u2713</span>' : '');
+    }
+  }
+
+  // Swap the visible draft to variation `idx`, reassigning the closure vars that
+  // approve/reject/send/copy all read. updateApprovalUI rebuilds the action row
+  // (incl. Refine + Gmail button) against the newly-selected messageId/status.
+  function selectVariation(idx) {
+    if (idx === selIdx || !variations[idx]) return;
+    selIdx = idx;
+    var v = variations[idx];
+    messageId = v.id;
+    subject = v.subject;
+    emailBody = v.body;
+    var subjEl = mo.querySelector('.email-subject');
+    if (subjEl) subjEl.textContent = subject;
+    var bodyEl = mo.querySelector('.email-body');
+    if (bodyEl) bodyEl.innerHTML = md(emailBody);
+    var dsBtns = mo.querySelectorAll('[data-subject]');
+    for (var di = 0; di < dsBtns.length; di++) dsBtns[di].setAttribute('data-subject', subject);
+    updateApprovalUI(v.status);
+    refreshVariationTabs();
+  }
+
+  // Delegated tab clicks (survives refreshVariationTabs, which never rebuilds markup).
+  var variationSelectorEl = document.getElementById('variation-selector');
+  if (variationSelectorEl) {
+    variationSelectorEl.addEventListener('click', function(ev) {
+      var btn = ev.target.closest ? ev.target.closest('.variation-tab') : null;
+      if (btn) selectVariation(parseInt(btn.getAttribute('data-vidx'), 10));
+    });
+  }
 
   // Gmail send handler — now includes messageId for backend approval check
   var sendGmailBtn = document.getElementById('send-gmail');
@@ -1506,8 +1641,8 @@ async function generateEmail(a, cache) {
       var subj = sendGmailBtn.getAttribute('data-subject') || '';
       var bodyEl = mo.querySelector('.email-body');
       var bodyText = bodyEl ? bodyEl.innerText : '';
-      var toAddr = prompt('Send to email address:');
-      if (!toAddr) return;
+      var toAddr = getRecipient('recipient-select', 'recipient-custom');
+      if (!toAddr || toAddr.indexOf('@') < 0) { toast('Please choose a contact or enter a valid recipient email', 'error'); return; }
       sendGmailBtn.disabled = true;
       sendGmailBtn.innerHTML = '<div class="spinner" style="width:12px;height:12px;border-width:2px;display:inline-block;vertical-align:middle;margin-right:6px"></div> Sending...';
       fetch('/api/gmail/send', {
@@ -1890,6 +2025,32 @@ function renderCampaignDetail(c, id) {
     var emails = data.emails;
     var pendingAccounts = data.pendingAccounts || [];
 
+    // Group emails by variation_group (3 sibling drafts share one group id).
+    // NULL group => standalone single-variation email (key 'solo-<id>').
+    var groups = [];
+    var _groupMap = {};
+    for (var gi = 0; gi < emails.length; gi++) {
+      var _em = emails[gi];
+      var _gkey = _em.variation_group || ('solo-' + _em.id);
+      if (!_groupMap[_gkey]) {
+        _groupMap[_gkey] = { key: _gkey, items: [], account_id: _em.account_id, account_name: _em.account_name };
+        groups.push(_groupMap[_gkey]);
+      }
+      _groupMap[_gkey].items.push(_em);
+    }
+    for (var gj = 0; gj < groups.length; gj++) {
+      groups[gj].items.sort(function(a, b) { return (a.variation_index || 0) - (b.variation_index || 0); });
+      var _appr = null, _hasPend = false;
+      for (var gk = 0; gk < groups[gj].items.length; gk++) {
+        var _st = groups[gj].items[gk].approval_status || 'pending_approval';
+        if (_st === 'approved' && !_appr) _appr = groups[gj].items[gk];
+        if (_st === 'pending_approval') _hasPend = true;
+      }
+      groups[gj].approvedItem = _appr;
+      groups[gj].status = _appr ? 'approved' : (_hasPend ? 'pending_approval' : 'rejected');
+      groups[gj].activeIndex = _appr ? groups[gj].items.indexOf(_appr) : 0;
+    }
+
     var h = '<div class="fade-in">';
     h += '<a href="#/campaigns" class="back-link">' + IC.back + ' All Campaigns</a>';
 
@@ -1940,9 +2101,9 @@ function renderCampaignDetail(c, id) {
 
     // Approval summary + bulk actions
     if (emails.length) {
-      var approvedCount = emails.filter(function(e) { return e.approval_status === 'approved'; }).length;
-      var rejectedCount = emails.filter(function(e) { return e.approval_status === 'rejected'; }).length;
-      var pendingApprovalCount = emails.filter(function(e) { return !e.approval_status || e.approval_status === 'pending_approval'; }).length;
+      var approvedCount = groups.filter(function(g) { return g.status === 'approved'; }).length;
+      var rejectedCount = groups.filter(function(g) { return g.status === 'rejected'; }).length;
+      var pendingApprovalCount = groups.filter(function(g) { return g.status === 'pending_approval'; }).length;
 
       h += '<div class="d-card" style="margin-bottom:16px;padding:16px 20px">';
       h += '<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">';
@@ -1962,7 +2123,7 @@ function renderCampaignDetail(c, id) {
 
       // Filter tabs
       h += '<div style="display:flex;gap:6px;margin-top:12px">';
-      h += '<button class="btn btn-ghost btn-sm camp-filter-btn" data-filter="all" style="font-size:11px">All (' + emails.length + ')</button>';
+      h += '<button class="btn btn-ghost btn-sm camp-filter-btn" data-filter="all" style="font-size:11px">All (' + groups.length + ')</button>';
       h += '<button class="btn btn-ghost btn-sm camp-filter-btn" data-filter="pending_approval" style="font-size:11px">Pending (' + pendingApprovalCount + ')</button>';
       h += '<button class="btn btn-ghost btn-sm camp-filter-btn" data-filter="approved" style="font-size:11px">Approved (' + approvedCount + ')</button>';
       if (rejectedCount > 0) h += '<button class="btn btn-ghost btn-sm camp-filter-btn" data-filter="rejected" style="font-size:11px">Rejected (' + rejectedCount + ')</button>';
@@ -1977,28 +2138,30 @@ function renderCampaignDetail(c, id) {
     }
 
     // Email list with recipient info + approval controls
-    h += '<div class="persona-section-title">Generated Emails (' + emails.length + ')</div>';
+    h += '<div class="persona-section-title">Generated Emails (' + groups.length + ')</div>';
     h += '<div id="campaign-email-list">';
-    for (var i = 0; i < emails.length; i++) {
-      var e = emails[i];
-      var eApproval = e.approval_status || 'pending_approval';
-      var body = (e.content || '').replace(/^Subject:.*\n*/im, '');
+    for (var i = 0; i < groups.length; i++) {
+      var grp = groups[i];
+      var items = grp.items;
+      var gApproval = grp.status;
+      var e = items[grp.activeIndex] || items[0];
+      var isMulti = items.length > 1;
 
-      // Build location string from account data
+      // Build location string from account data (shared across the group)
       var eLoc = [];
       if (e.billing_city) eLoc.push(e.billing_city);
       if (e.billing_state) eLoc.push(e.billing_state);
       if (e.billing_country) eLoc.push(e.billing_country);
       var eLocStr = eLoc.join(', ') || '';
 
-      h += '<div class="email-preview camp-email-card" data-approval="' + eApproval + '" data-email-id="' + e.id + '" style="margin-bottom:14px">';
+      h += '<div class="email-preview camp-email-card" data-approval="' + gApproval + '" data-group="' + esc(grp.key) + '" data-email-id="' + e.id + '" style="margin-bottom:14px">';
 
-      // Recipient info bar
+      // Recipient / account info bar (shared)
       h += '<div class="approval-recipient-card compact">';
       h += '<div class="approval-recipient-body" style="padding:10px 16px">';
       h += '<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">';
       h += '<div>';
-      h += '<div class="approval-recipient-name" style="font-size:14px">' + esc(e.account_name) + '</div>';
+      h += '<div class="approval-recipient-name" style="font-size:14px">' + esc(grp.account_name) + '</div>';
       h += '<div class="approval-recipient-details" style="margin-top:2px">';
       if (e.website || e.website_domain) h += '<span>' + esc(e.website || e.website_domain) + '</span>';
       if (e.industry) h += '<span>' + esc(e.industry) + '</span>';
@@ -2012,31 +2175,76 @@ function renderCampaignDetail(c, id) {
         h += '</div>';
       }
       h += '</div>';
-      // Per-email approval badge + actions
+      // Group-level approval badge
       h += '<div style="display:flex;align-items:center;gap:8px;flex-shrink:0">';
-      h += '<span class="approval-badge approval-' + eApproval + ' camp-email-badge" data-eid="' + e.id + '">' + getApprovalLabel(eApproval) + '</span>';
-      if (eApproval === 'pending_approval' || eApproval === 'rejected') {
-        h += '<button class="btn btn-sm approval-approve-btn camp-approve-btn" data-eid="' + e.id + '" style="padding:4px 10px;font-size:11px">Approve</button>';
-      }
-      if (eApproval === 'pending_approval' || eApproval === 'approved') {
-        var rejectLabel = eApproval === 'approved' ? 'Revoke' : 'Reject';
-        h += '<button class="btn btn-sm approval-reject-btn camp-reject-btn" data-eid="' + e.id + '" style="padding:4px 10px;font-size:11px">' + rejectLabel + '</button>';
-      }
-      h += '<button class="btn btn-sm" style="background:var(--glass);color:var(--text-secondary);padding:4px 10px;font-size:11px" onclick="openEmailChat(' + e.id + ',\'campaign_email\')">Refine with AI</button>';
+      h += '<span class="approval-badge approval-' + gApproval + '">' + getApprovalLabel(gApproval) + (isMulti ? ' \u00b7 ' + items.length + ' variations' : '') + '</span>';
       h += '</div>';
       h += '</div></div></div>';
 
-      h += '<div class="email-toolbar"><div class="email-dot r"></div><div class="email-dot y"></div><div class="email-dot g"></div>';
-      h += '<span style="margin-left:auto;font-size:11px;color:var(--text-muted);font-weight:600">' + e.account_name + '</span></div>';
-      h += '<div class="email-subject-bar"><div class="email-subject-label">Subject</div><div class="email-subject">' + (e.subject || '') + '</div></div>';
-      h += '<div class="email-body" style="max-height:200px;overflow:hidden;position:relative">' + md(body);
-      h += '<div style="position:absolute;bottom:0;left:0;right:0;height:60px;background:linear-gradient(transparent,var(--bg-surface))"></div>';
+      // Variation tab bar (only when >1 drafts in the group)
+      if (isMulti) {
+        h += '<div class="variation-tabs" style="display:flex;gap:6px;flex-wrap:wrap;padding:10px 16px 0">';
+        for (var vt = 0; vt < items.length; vt++) {
+          var itv = items[vt];
+          var vst = itv.approval_status || 'pending_approval';
+          var letter = String.fromCharCode(65 + vt);
+          var vlabel = itv.variation_label || ('Variation ' + (vt + 1));
+          var tabActive = vt === grp.activeIndex;
+          h += '<button class="btn btn-sm camp-var-tab' + (tabActive ? ' selected' : '') + '" data-group="' + esc(grp.key) + '" data-vindex="' + vt + '" style="font-size:11px;padding:5px 12px">'
+            + letter + ' \u00b7 ' + esc(vlabel) + (vst === 'approved' ? ' <span style="color:var(--green)">\u2713</span>' : '') + '</button>';
+        }
+        h += '</div>';
+      }
+
+      // Variation panes (one per draft; only active shown)
+      for (var vp = 0; vp < items.length; vp++) {
+        var ev = items[vp];
+        var evApproval = ev.approval_status || 'pending_approval';
+        var evBody = (ev.content || '').replace(/^Subject:.*\n*/im, '');
+        var paneActive = vp === grp.activeIndex;
+        h += '<div class="camp-var-pane" data-group="' + esc(grp.key) + '" data-vindex="' + vp + '" style="display:' + (paneActive ? 'block' : 'none') + '">';
+
+        // Per-variation approval controls
+        h += '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:10px 16px 0">';
+        h += '<span class="approval-badge approval-' + evApproval + ' camp-email-badge" data-eid="' + ev.id + '">' + getApprovalLabel(evApproval) + '</span>';
+        if (evApproval === 'pending_approval' || evApproval === 'rejected') {
+          h += '<button class="btn btn-sm approval-approve-btn camp-approve-btn" data-eid="' + ev.id + '" style="padding:4px 10px;font-size:11px">Approve</button>';
+        }
+        if (evApproval === 'pending_approval' || evApproval === 'approved') {
+          var rejectLabel = evApproval === 'approved' ? 'Revoke' : 'Reject';
+          h += '<button class="btn btn-sm approval-reject-btn camp-reject-btn" data-eid="' + ev.id + '" style="padding:4px 10px;font-size:11px">' + rejectLabel + '</button>';
+        }
+        h += '<button class="btn btn-sm" style="background:var(--glass);color:var(--text-secondary);padding:4px 10px;font-size:11px" onclick="openEmailChat(' + ev.id + ',\'campaign_email\')">Refine with AI</button>';
+        h += '</div>';
+
+        h += '<div class="email-toolbar" style="margin-top:10px"><div class="email-dot r"></div><div class="email-dot y"></div><div class="email-dot g"></div>';
+        h += '<span style="margin-left:auto;font-size:11px;color:var(--text-muted);font-weight:600">' + esc(grp.account_name) + '</span></div>';
+        h += '<div class="email-subject-bar"><div class="email-subject-label">Subject</div><div class="email-subject">' + esc(ev.subject || '') + '</div></div>';
+        h += '<div class="email-body" style="max-height:200px;overflow:hidden;position:relative">' + md(evBody);
+        h += '<div style="position:absolute;bottom:0;left:0;right:0;height:60px;background:linear-gradient(transparent,var(--bg-surface))"></div>';
+        h += '</div>';
+        h += '<div class="email-actions"><button class="btn btn-primary btn-sm" onclick="copyEl(this,\'email\')">' + IC.copy + ' Copy</button>';
+        h += '<button class="btn btn-ghost btn-sm" onclick="this.closest(\'.camp-var-pane\').querySelector(\'.email-body\').style.maxHeight=\'none\';this.closest(\'.camp-var-pane\').querySelector(\'.email-body div\').style.display=\'none\';this.textContent=\'Expanded\'">Expand</button>';
+        h += '<button class="btn btn-ghost btn-sm regen-btn" data-email-account-id="' + ev.account_id + '" data-email-account-name="' + (grp.account_name || '').replace(/"/g, '&quot;') + '" style="color:var(--text-muted)">' + IC.sparkles + ' Regenerate</button>';
+        h += '</div>';
+        h += '</div>'; // .camp-var-pane
+      }
+
+      // Approval-gated Send section (eager recipient picker for the approved variation)
+      h += '<div class="camp-send-section" style="padding:12px 16px;border-top:1px solid var(--border);margin-top:10px">';
+      if (grp.approvedItem && window._gmailConnected) {
+        h += '<div class="camp-recip-slot" id="camp-recip-slot-' + grp.approvedItem.id + '" data-account-id="' + grp.account_id + '" data-eid="' + grp.approvedItem.id + '">';
+        h += '<div style="font-size:11px;color:var(--text-muted)"><span class="spinner" style="width:11px;height:11px;border-width:1.5px;display:inline-block;vertical-align:middle"></span> Loading contacts\u2026</div>';
+        h += '</div>';
+        h += '<button class="btn btn-primary btn-sm camp-send-btn" id="camp-send-btn-' + grp.approvedItem.id + '" data-eid="' + grp.approvedItem.id + '" style="margin-top:8px">' + IC.send + ' Send Approved via Gmail</button>';
+      } else if (grp.approvedItem && !window._gmailConnected) {
+        h += '<div style="font-size:12px;color:var(--text-muted)">Connect Gmail (Settings) to send this approved email.</div>';
+      } else {
+        h += '<div style="font-size:12px;color:var(--text-muted)">Approve a variation to enable sending.</div>';
+      }
       h += '</div>';
-      h += '<div class="email-actions"><button class="btn btn-primary btn-sm" onclick="copyEl(this,\'email\')">' + IC.copy + ' Copy</button>';
-      h += '<button class="btn btn-ghost btn-sm" onclick="this.closest(\'.email-preview\').querySelector(\'.email-body\').style.maxHeight=\'none\';this.closest(\'.email-preview\').querySelector(\'.email-body div\').style.display=\'none\';this.textContent=\'Expanded\'">Expand</button>';
-      h += '<button class="btn btn-ghost btn-sm regen-btn" data-email-account-id="' + e.account_id + '" data-email-account-name="' + (e.account_name || '').replace(/"/g, '&quot;') + '" style="color:var(--text-muted)">' + IC.sparkles + ' Regenerate</button>';
-      h += '</div>';
-      h += '</div>';
+
+      h += '</div>'; // .camp-email-card
     }
     h += '</div>';
 
@@ -2325,14 +2533,81 @@ function renderCampaignDetail(c, id) {
     var copyAllBtn = document.getElementById('copy-all-btn');
     if (copyAllBtn) {
       copyAllBtn.addEventListener('click', function() {
-        var allText = emails.map(function(e) {
+        var chosen = groups.map(function(g) { return g.approvedItem || g.items[g.activeIndex] || g.items[0]; });
+        var allText = chosen.map(function(e) {
           return 'TO: ' + e.account_name + '\n' + e.content + '\n---\n';
         }).join('\n');
         navigator.clipboard.writeText(allText).then(function() {
-          copyAllBtn.innerHTML = IC.copy + ' Copied ' + emails.length + ' emails!';
+          copyAllBtn.innerHTML = IC.copy + ' Copied ' + chosen.length + ' emails!';
           setTimeout(function() { copyAllBtn.innerHTML = IC.copy + ' Copy All Emails'; }, 2000);
         });
       });
+    }
+
+    // ── Variation tab switching (A/B/C) ──
+    var varTabs = document.querySelectorAll('.camp-var-tab');
+    for (var vtb = 0; vtb < varTabs.length; vtb++) {
+      (function(tab) {
+        tab.addEventListener('click', function() {
+          var gkey = tab.getAttribute('data-group');
+          var vidx = tab.getAttribute('data-vindex');
+          var tabs = document.querySelectorAll('.camp-var-tab');
+          for (var t = 0; t < tabs.length; t++) {
+            if (tabs[t].getAttribute('data-group') === gkey) tabs[t].classList.toggle('selected', tabs[t].getAttribute('data-vindex') === vidx);
+          }
+          var panes = document.querySelectorAll('.camp-var-pane');
+          for (var p = 0; p < panes.length; p++) {
+            if (panes[p].getAttribute('data-group') === gkey) panes[p].style.display = (panes[p].getAttribute('data-vindex') === vidx) ? 'block' : 'none';
+          }
+        });
+      })(varTabs[vtb]);
+    }
+
+    // ── Eager recipient load for approved variations ──
+    var recipSlots = document.querySelectorAll('.camp-recip-slot');
+    for (var rs = 0; rs < recipSlots.length; rs++) {
+      (function(slot) {
+        var accId = slot.getAttribute('data-account-id');
+        var reid = slot.getAttribute('data-eid');
+        api.get('/contacts/' + accId).then(function(contacts) {
+          slot.innerHTML = recipientPickerHTML(contacts, { selectId: 'camp-recip-select-' + reid, inputId: 'camp-recip-custom-' + reid });
+        }).catch(function() {
+          slot.innerHTML = recipientPickerHTML([], { selectId: 'camp-recip-select-' + reid, inputId: 'camp-recip-custom-' + reid });
+        });
+      })(recipSlots[rs]);
+    }
+
+    // ── Send approved variation via Gmail ──
+    var sendBtns = document.querySelectorAll('.camp-send-btn');
+    for (var sb = 0; sb < sendBtns.length; sb++) {
+      (function(btn) {
+        btn.addEventListener('click', function() {
+          var eid = btn.getAttribute('data-eid');
+          var toAddr = getRecipient('camp-recip-select-' + eid, 'camp-recip-custom-' + eid);
+          if (!toAddr) { toast('Enter or select a recipient email', 'error'); return; }
+          btn.disabled = true;
+          var orig = btn.innerHTML;
+          btn.innerHTML = IC.send + ' Sending\u2026';
+          var recips = {}; recips[String(eid)] = toAddr;
+          api.post('/gmail/send-campaign/' + id, { emailIds: [parseInt(eid, 10)], recipients: recips }).then(function(d) {
+            var r0 = d.results && d.results[0];
+            if (r0 && r0.status === 'sent') {
+              toast('Sent to ' + toAddr, 'success');
+              btn.innerHTML = IC.send + ' Sent \u2713';
+              if (d.dailyLimit) showEmailLimitWarning(d.dailyLimit.sent, d.dailyLimit.limit);
+            } else if (r0 && r0.status === 'skipped') {
+              toast(r0.error || 'Skipped', 'error');
+              btn.disabled = false; btn.innerHTML = orig;
+            } else {
+              toast((r0 && r0.error) || 'Send failed', 'error');
+              btn.disabled = false; btn.innerHTML = orig;
+            }
+          }).catch(function(e) {
+            toast(e.message || 'Send failed', 'error');
+            btn.disabled = false; btn.innerHTML = orig;
+          });
+        });
+      })(sendBtns[sb]);
     }
 
   }).catch(function(err) {
@@ -4200,7 +4475,7 @@ window.mcpQuickAdd = function(name, displayName) {
 window.copyEl=function(btn,mode){
   let text;
   if(mode==='subject'){text=btn.dataset.subject;}
-  else if(mode==='email'){const body=btn.closest('.email-preview')?.querySelector('.email-body');text=body?.innerText||'';}
+  else if(mode==='email'){const scope=btn.closest('.camp-var-pane')||btn.closest('.email-preview');const body=scope?.querySelector('.email-body');text=body?.innerText||'';}
   else{const body=btn.closest('.output-card')?.querySelector('.output-body');text=body?.innerText||'';}
   navigator.clipboard.writeText(text).then(()=>{const orig=btn.innerHTML;btn.innerHTML=`${IC.copy} Copied!`;setTimeout(()=>btn.innerHTML=orig,2000);});
 };
